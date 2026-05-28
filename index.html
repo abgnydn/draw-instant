@@ -1,0 +1,634 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <script>
+    // TEMP DIAGNOSTIC: capture stack at every failing createBindGroup.
+    (function(){
+      if (!navigator.gpu) return;
+      const origRA = navigator.gpu.requestAdapter.bind(navigator.gpu);
+      navigator.gpu.requestAdapter = async function(...a){
+        const ad = await origRA(...a);
+        if (!ad) return ad;
+        const origRD = ad.requestDevice.bind(ad);
+        ad.requestDevice = async function(...b){
+          const dev = await origRD(...b);
+          dev.addEventListener('uncapturederror', (e) => {
+            console.error('[WGPU UNCAPTURED]', e.error && e.error.message, '\n', window.__lastCBGStack || '(no stack captured)');
+          });
+          const origCBG = dev.createBindGroup.bind(dev);
+          dev.createBindGroup = function(desc){
+            window.__lastCBGStack = new Error('cbg-callsite').stack;
+            const bg = origCBG(desc);
+            return bg;
+          };
+          return dev;
+        };
+        return ad;
+      };
+    })();
+  </script>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>draw.instant — AI image generation that updates as you type</title>
+  <meta name="description" content="Real-time image generation in your browser. 100% on-device. No server, no login, no upload. Powered by WebGPU kernel fusion." />
+  <meta name="theme-color" content="#0a0a0a" />
+  <meta name="color-scheme" content="dark" />
+  <meta property="og:title" content="draw.instant" />
+  <meta property="og:description" content="AI images that form under your cursor. 100% in your browser." />
+  <meta property="og:type" content="website" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230a0a0a'/%3E%3Ccircle cx='16' cy='16' r='6' fill='none' stroke='%23ff5a1f' stroke-width='2'/%3E%3C/svg%3E" />
+  <style>
+    :root {
+      --bg: #0a0a0a;
+      --surface: #141414;
+      --border: #262626;
+      --text: #fafafa;
+      --muted: #8a8a8a;
+      --dim: #555;
+      --accent: #ff5a1f;
+      --accent-dim: #ff5a1f22;
+      --ok: #4ade80;
+      --err: #f87171;
+      --warn: #f59e0b;
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      background: var(--bg); color: var(--text);
+      font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+      font-size: 15px; line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
+    }
+    code, pre, .mono {
+      font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    .wrap { max-width: 1080px; margin: 0 auto; padding: 20px 24px 60px; }
+
+    /* Masthead */
+    header.mast {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 8px 0 24px; border-bottom: 1px solid var(--border); margin-bottom: 32px;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; }
+    .mark {
+      width: 22px; height: 22px; border-radius: 5px; background: var(--bg);
+      border: 2px solid var(--accent); position: relative;
+    }
+    .mark::after {
+      content: ''; position: absolute; inset: 5px; border-radius: 50%;
+      background: var(--accent);
+    }
+    .brand-name { font-weight: 700; letter-spacing: -0.01em; font-size: 17px; }
+    .brand-name .dot { color: var(--accent); }
+    .nav { display: flex; gap: 20px; font-size: 13px; color: var(--muted); }
+    .nav a { color: inherit; text-decoration: none; transition: color .15s; }
+    .nav a:hover { color: var(--text); }
+
+    /* Hero */
+    h1 {
+      font-family: 'Instrument Serif', 'Iowan Old Style', Georgia, serif;
+      font-weight: 400; font-size: clamp(44px, 7vw, 80px); line-height: 1.02;
+      letter-spacing: -0.02em; margin: 0 0 16px;
+    }
+    h1 em { font-style: italic; color: var(--accent); }
+    .lede {
+      font-size: 17px; color: var(--muted); max-width: 560px; margin-bottom: 28px;
+    }
+
+    /* Preflight */
+    .preflight {
+      border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+      background: var(--surface); margin-bottom: 20px; font-size: 13px;
+      display: flex; align-items: center; gap: 12px;
+    }
+    .preflight.ok { border-color: #2a4a35; background: #0f1a12; }
+    .preflight.err { border-color: #4a2a2a; background: #1a0f0f; }
+    .preflight.warn { border-color: #4a3d2a; background: #1a140f; }
+    .dot-status {
+      width: 8px; height: 8px; border-radius: 50%; background: var(--muted);
+      flex-shrink: 0;
+    }
+    .preflight.ok .dot-status { background: var(--ok); }
+    .preflight.err .dot-status { background: var(--err); }
+    .preflight.warn .dot-status { background: var(--warn); }
+    .preflight-txt { flex: 1; }
+    .preflight-txt strong { color: var(--text); font-weight: 600; }
+
+    /* Main UI */
+    .stage {
+      display: grid; grid-template-columns: 1fr; gap: 20px;
+      margin-bottom: 32px;
+    }
+    @media (min-width: 820px) {
+      .stage { grid-template-columns: 1fr 1fr; }
+    }
+
+    .canvas-card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+      padding: 16px; display: flex; flex-direction: column; gap: 12px;
+      min-height: 440px;
+    }
+    .canvas-wrap {
+      position: relative; aspect-ratio: 1; width: 100%;
+      background: #050505; border-radius: 8px; overflow: hidden;
+      display: flex; align-items: center; justify-content: center;
+    }
+    canvas#view { display: block; width: 100%; height: 100%; image-rendering: auto; }
+    .canvas-placeholder {
+      color: var(--dim); font-size: 13px; text-align: center; padding: 20px;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+    }
+
+    .controls-card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+      padding: 16px; display: flex; flex-direction: column; gap: 14px;
+    }
+    label.lbl {
+      font-size: 11px; text-transform: uppercase; letter-spacing: 0.09em;
+      color: var(--muted); font-weight: 500;
+    }
+
+    textarea#prompt {
+      width: 100%; min-height: 90px; padding: 12px;
+      background: var(--bg); color: var(--text); border: 1px solid var(--border);
+      border-radius: 8px; font-family: inherit; font-size: 15px; line-height: 1.45;
+      resize: vertical; outline: none; transition: border-color .15s;
+    }
+    textarea#prompt:focus { border-color: var(--accent); }
+
+    .slider-row { display: flex; align-items: center; gap: 12px; }
+    .slider-row .lbl { flex: 0 0 80px; }
+    input[type="range"] {
+      flex: 1; accent-color: var(--accent);
+    }
+    .val { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--muted); min-width: 48px; text-align: right; }
+
+    button.go {
+      padding: 12px 20px; font-size: 14px; font-weight: 600;
+      background: var(--accent); color: #0a0a0a; border: none; border-radius: 8px;
+      cursor: pointer; transition: filter .15s, opacity .15s;
+    }
+    button.go:hover:not(:disabled) { filter: brightness(1.1); }
+    button.go:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* Metrics bar */
+    .metrics {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px;
+      background: var(--border); border: 1px solid var(--border); border-radius: 10px;
+      overflow: hidden; margin-bottom: 32px;
+    }
+    .metric { background: var(--surface); padding: 12px 14px; }
+    .metric-lbl { font-size: 10px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted); margin-bottom: 4px; }
+    .metric-val { font-family: 'JetBrains Mono', monospace; font-size: 18px; font-weight: 500; }
+    .metric-val.accent { color: var(--accent); }
+
+    /* Explainer */
+    .explainer {
+      border-top: 1px solid var(--border); padding-top: 32px; margin-top: 32px;
+      color: var(--muted); font-size: 14px;
+    }
+    .explainer h2 {
+      font-family: 'Instrument Serif', Georgia, serif; font-weight: 400;
+      font-size: 32px; color: var(--text); margin: 0 0 12px;
+    }
+    .explainer p { margin: 0 0 12px; max-width: 680px; }
+    .explainer strong { color: var(--text); font-weight: 600; }
+    .explainer a { color: var(--accent); text-decoration: none; }
+    .explainer a:hover { text-decoration: underline; }
+
+    .pipe-diagram {
+      display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0;
+      font-family: 'JetBrains Mono', monospace; font-size: 12px;
+    }
+    .pipe-step {
+      padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px;
+      background: var(--surface);
+    }
+    .pipe-step.hot { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
+    .arrow { color: var(--dim); padding: 0 2px; align-self: center; }
+
+    footer {
+      border-top: 1px solid var(--border); padding-top: 18px; margin-top: 48px;
+      display: flex; justify-content: space-between; color: var(--muted); font-size: 12px;
+    }
+    footer a { color: inherit; text-decoration: none; }
+    footer a:hover { color: var(--text); }
+
+    /* Status line */
+    .status-line {
+      font-family: 'JetBrains Mono', monospace; font-size: 12px;
+      color: var(--muted); min-height: 18px;
+    }
+    .status-line.live { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="mast">
+      <div class="brand">
+        <div class="mark" aria-hidden="true"></div>
+        <span class="brand-name">draw<span class="dot">.</span>instant</span>
+      </div>
+      <nav class="nav">
+        <a href="#how">How</a>
+        <a href="#roadmap">Roadmap</a>
+        <a href="https://kernelfusion.dev" target="_blank" rel="noopener">kernelfusion.dev</a>
+      </nav>
+    </header>
+
+    <main>
+      <h1>AI images that form <em>as you type.</em></h1>
+      <p class="lede">
+        Real-time diffusion in your browser. Nothing uploads. No login, no account, no credits.
+        Powered by fused WebGPU dispatches — the same technique that lets us beat PyTorch by
+        two orders of magnitude on consumer GPUs.
+      </p>
+
+      <div class="preflight" id="preflight" role="status" aria-live="polite">
+        <span class="dot-status"></span>
+        <span class="preflight-txt">Checking WebGPU support…</span>
+      </div>
+      <div class="mono" id="ort-line" style="display: none; font-size: 11px; color: var(--muted); margin: -12px 0 20px; padding-left: 16px; letter-spacing: 0.02em;">
+      </div>
+
+      <section class="stage">
+        <div class="canvas-card">
+          <div class="canvas-wrap">
+            <canvas id="view" width="512" height="512"></canvas>
+            <div class="canvas-placeholder" id="canvas-placeholder">
+              [ canvas — preview renders here ]
+            </div>
+          </div>
+          <div class="status-line" id="status">idle</div>
+        </div>
+
+        <div class="controls-card">
+          <div>
+            <label class="lbl" for="prompt">Prompt</label>
+            <textarea id="prompt" placeholder="a red panda astronaut, studio photo, dramatic light">a red panda astronaut, studio photo, dramatic light</textarea>
+          </div>
+
+          <div class="slider-row">
+            <label class="lbl" for="steps">Steps</label>
+            <input type="range" id="steps" min="1" max="8" step="1" value="1" />
+            <span class="val" id="steps-val">1</span>
+          </div>
+
+          <div class="slider-row">
+            <label class="lbl" for="seed">Seed</label>
+            <input type="range" id="seed" min="0" max="9999" step="1" value="42" />
+            <span class="val" id="seed-val">42</span>
+          </div>
+
+          <div class="slider-row">
+            <label class="lbl" for="guidance">Guidance</label>
+            <input type="range" id="guidance" min="0" max="8" step="0.1" value="1.0" />
+            <span class="val" id="guidance-val">1.0</span>
+          </div>
+
+          <div class="slider-row">
+            <label class="lbl" for="resolution">Resolution</label>
+            <select id="resolution" style="flex: 1; background: var(--bg); color: var(--fg); border: 1px solid var(--border); padding: 4px 8px; border-radius: 4px; font-family: inherit;">
+              <option value="512">512 × 512</option>
+              <option value="256">256 × 256 (4× faster)</option>
+            </select>
+          </div>
+
+          <button class="go" id="generate" disabled>Generate</button>
+
+          <div id="sd-panel" style="display: none; border-top: 1px solid var(--border); padding-top: 12px; margin-top: 2px;">
+            <div class="lbl" style="margin-bottom: 6px;">Text encoder download</div>
+            <div style="height: 6px; background: var(--bg); border-radius: 3px; overflow: hidden; border: 1px solid var(--border);">
+              <div id="sd-progress-bar" style="height: 100%; width: 0%; background: var(--accent); transition: width .18s ease-out;"></div>
+            </div>
+            <div class="mono" id="sd-progress-txt" style="font-size: 11px; color: var(--muted); margin-top: 6px; letter-spacing: 0.02em;">
+              idle
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div class="mono" id="sd-line" style="display: none; font-size: 11px; color: var(--muted); margin: -12px 0 20px; padding-left: 16px; letter-spacing: 0.02em;">
+      </div>
+
+      <div class="metrics">
+        <div class="metric">
+          <div class="metric-lbl">fused · ms</div>
+          <div class="metric-val accent" id="m-step">—</div>
+        </div>
+        <div class="metric">
+          <div class="metric-lbl">naive · ms</div>
+          <div class="metric-val" id="m-total">—</div>
+        </div>
+        <div class="metric">
+          <div class="metric-lbl">speedup</div>
+          <div class="metric-val accent" id="m-disp">—</div>
+        </div>
+        <div class="metric">
+          <div class="metric-lbl">backend</div>
+          <div class="metric-val mono" id="m-backend" style="font-size: 13px;">—</div>
+        </div>
+      </div>
+      <p class="mono" style="color: var(--muted); font-size: 11px; margin: -20px 0 8px; letter-spacing: 0.04em;">
+        Probe: element-wise chain (mul·add → relu → sub → tanh → mul → sigmoid) over 1M floats.
+        Fused = 1 dispatch, chain lives in registers. Naive = 6 dispatches, intermediates in global memory.
+        Both produce identical output; the delta is pure dispatch + memory-traffic overhead.
+      </p>
+      <p id="probe-interp" style="color: var(--muted); font-size: 13px; margin: 0 0 32px; max-width: 720px;">
+        Waiting for probe…
+      </p>
+
+      <div class="mono" style="color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.12em; margin: 0 0 10px;">
+        v1 · fused FFN block · real SD-Turbo shapes
+      </div>
+      <div class="metrics" id="ffn-cells">
+        <div class="metric">
+          <div class="metric-lbl">FFN naive · ms</div>
+          <div class="metric-val">—</div>
+        </div>
+        <div class="metric">
+          <div class="metric-lbl">FFN fused · ms</div>
+          <div class="metric-val accent">—</div>
+        </div>
+        <div class="metric">
+          <div class="metric-lbl">speedup</div>
+          <div class="metric-val">—</div>
+        </div>
+        <div class="metric">
+          <div class="metric-lbl">effective TFLOPS</div>
+          <div class="metric-val mono" style="font-size: 13px;">—</div>
+        </div>
+      </div>
+      <p class="mono" style="color: var(--muted); font-size: 11px; margin: -20px 0 8px; letter-spacing: 0.04em;">
+        FFN block: (matmul → GELU → matmul → residual) at mid-block shape [2·1024·1280]·[1280·5120]·[5120·1280].
+        Naive = 4 dispatches with intermediates in global memory. Fused = 2 dispatches with GELU + residual baked into matmul epilogues.
+        Same tiled matmul in both paths — the delta is fusion, not kernel quality.
+      </p>
+      <p id="ffn-interp" style="color: var(--muted); font-size: 13px; margin: 0 0 32px; max-width: 720px;">
+        Waiting for FFN block benchmark…
+      </p>
+
+      <div class="mono" style="color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.12em; margin: 0 0 10px;">
+        v1.1 · fused attention · flash-attention-style single dispatch
+      </div>
+      <div class="metrics" id="attn-cells">
+        <div class="metric">
+          <div class="metric-lbl">attn naive · ms</div>
+          <div class="metric-val">—</div>
+        </div>
+        <div class="metric">
+          <div class="metric-lbl">attn fused · ms</div>
+          <div class="metric-val accent">—</div>
+        </div>
+        <div class="metric">
+          <div class="metric-lbl">speedup</div>
+          <div class="metric-val">—</div>
+        </div>
+        <div class="metric">
+          <div class="metric-lbl">max abs Δ</div>
+          <div class="metric-val mono" style="font-size: 12px;">—</div>
+        </div>
+      </div>
+      <p class="mono" style="color: var(--muted); font-size: 11px; margin: -20px 0 8px; letter-spacing: 0.04em;">
+        Self-attention at SD mid-block shape [B=2·H=20·S=256·head=64]. Naive = 3 dispatches (scores → softmax → attn-matmul) with scores + probs matrices materialized in global memory. Fused = 1 dispatch, scores stay in workgroup memory, softmax reduces cooperatively, output emits directly.
+      </p>
+      <p id="attn-interp" style="color: var(--muted); font-size: 13px; margin: 0 0 32px; max-width: 720px;">
+        Waiting for attention benchmark…
+      </p>
+
+      <div class="mono" style="color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.12em; margin: 0 0 10px;">
+        v1.2 · full transformer block · attention + FFN + LN + residuals, fused end-to-end
+      </div>
+      <div class="metrics" id="block-cells">
+        <div class="metric">
+          <div class="metric-lbl">block naive · ms</div>
+          <div class="metric-val">—</div>
+        </div>
+        <div class="metric">
+          <div class="metric-lbl">block fused · ms</div>
+          <div class="metric-val accent">—</div>
+        </div>
+        <div class="metric">
+          <div class="metric-lbl">speedup</div>
+          <div class="metric-val">—</div>
+        </div>
+        <div class="metric">
+          <div class="metric-lbl">dispatches</div>
+          <div class="metric-val mono" style="font-size: 13px;">—</div>
+        </div>
+      </div>
+      <p class="mono" style="color: var(--muted); font-size: 11px; margin: -20px 0 8px; letter-spacing: 0.04em;">
+        One full SD-Turbo transformer block [B=2·S=256·D=1280·heads=20×64·D_FFN=5120]. Naive = 14 dispatches (LN → Q/K/V → scores → softmax → attn → out-proj → residual → LN → FFN-up → GELU → FFN-down → residual). Fused = 9 dispatches (flash-attn collapses 3 into 1, GELU folds into FFN-up matmul, both residuals fold into their producer matmul epilogues). Runs ~16× per U-Net forward pass.
+      </p>
+      <p id="block-interp" style="color: var(--muted); font-size: 13px; margin: 0 0 32px; max-width: 720px;">
+        Waiting for full-block benchmark…
+      </p>
+
+      <div class="mono" style="color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.12em; margin: 0 0 10px;">
+        v2.5.0 · fused GroupNorm · building block toward our WGSL U-Net
+      </div>
+      <div class="metrics" id="gn-cells">
+        <div class="metric">
+          <div class="metric-lbl">GN naive · ms</div>
+          <div class="metric-val">—</div>
+        </div>
+        <div class="metric">
+          <div class="metric-lbl">GN fused · ms</div>
+          <div class="metric-val accent">—</div>
+        </div>
+        <div class="metric">
+          <div class="metric-lbl">speedup</div>
+          <div class="metric-val">—</div>
+        </div>
+        <div class="metric">
+          <div class="metric-lbl">max abs Δ</div>
+          <div class="metric-val mono" style="font-size: 12px;">—</div>
+        </div>
+      </div>
+      <p class="mono" style="color: var(--muted); font-size: 11px; margin: -20px 0 8px; letter-spacing: 0.04em;">
+        GroupNorm at SD-Turbo mid-block feature-map shape [B=1·C=1280·G=32·16×16]. Naive = 2 dispatches (stats → normalize, with mean/rsigma materialized in scratch). Fused = 1 dispatch, one workgroup per (b,g), 256-thread parallel tree-reduce for mean and variance, stats kept in workgroup scalars. Runs ~30× per U-Net forward pass.
+      </p>
+      <p id="gn-interp" style="color: var(--muted); font-size: 13px; margin: 0 0 32px; max-width: 720px;">
+        Waiting for GroupNorm benchmark…
+      </p>
+
+      <div class="mono" style="color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.12em; margin: 0 0 10px;">
+        v2.5.1 · fused Conv2d 3×3 · silu + residual in the epilogue
+      </div>
+      <div class="metrics" id="conv-cells">
+        <div class="metric">
+          <div class="metric-lbl">conv naive · ms</div>
+          <div class="metric-val">—</div>
+        </div>
+        <div class="metric">
+          <div class="metric-lbl">conv fused · ms</div>
+          <div class="metric-val accent">—</div>
+        </div>
+        <div class="metric">
+          <div class="metric-lbl">speedup</div>
+          <div class="metric-val">—</div>
+        </div>
+        <div class="metric">
+          <div class="metric-lbl">effective TFLOPS</div>
+          <div class="metric-val mono" style="font-size: 13px;">—</div>
+        </div>
+      </div>
+      <p class="mono" style="color: var(--muted); font-size: 11px; margin: -20px 0 8px; letter-spacing: 0.04em;">
+        Direct 3×3 Conv2d at SD-Turbo mid-block shape [B=1·C=1280·16×16·k=3]. Naive = 3 dispatches (conv → silu → residual-add), with Y re-read + re-written twice. Fused = 1 dispatch, SiLU + residual baked into the conv's per-output-value epilogue. Conv is called ~34× per U-Net forward pass.
+      </p>
+      <p id="conv-interp" style="color: var(--muted); font-size: 13px; margin: 0 0 32px; max-width: 720px;">
+        Waiting for Conv2d benchmark…
+      </p>
+
+      <div class="mono" style="color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.12em; margin: 0 0 10px;">
+        v2.5.2 · fused ResNet block · GN+SiLU+Conv ×2 + skip, end-to-end
+      </div>
+      <div class="metrics" id="resnet-cells">
+        <div class="metric">
+          <div class="metric-lbl">resnet naive · ms</div>
+          <div class="metric-val">—</div>
+        </div>
+        <div class="metric">
+          <div class="metric-lbl">resnet fused · ms</div>
+          <div class="metric-val accent">—</div>
+        </div>
+        <div class="metric">
+          <div class="metric-lbl">speedup</div>
+          <div class="metric-val">—</div>
+        </div>
+        <div class="metric">
+          <div class="metric-lbl">dispatches</div>
+          <div class="metric-val mono" style="font-size: 13px;">—</div>
+        </div>
+      </div>
+      <p class="mono" style="color: var(--muted); font-size: 11px; margin: -20px 0 8px; letter-spacing: 0.04em;">
+        Full SD-Turbo mid-block ResNet [B=1·C=1280·G=32·16×16·k=3]. Naive = 9 dispatches (GN-stats → GN-norm → SiLU → Conv1 → GN-stats → GN-norm → SiLU → Conv2 → skip-add). Fused = 4 dispatches (GN+SiLU collapsed via shared-mem stats, skip-add folded into Conv2's epilogue). First milestone where v2.5.0 and v2.5.1 chain end-to-end. Runs ~20× per U-Net forward pass.
+      </p>
+      <p id="resnet-interp" style="color: var(--muted); font-size: 13px; margin: 0 0 32px; max-width: 720px;">
+        Waiting for ResNet benchmark…
+      </p>
+
+      <div class="mono" style="color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.12em; margin: 0 0 10px;">
+        v2.5.3 · fused cross-attention · flash-attn over S_kv axis
+      </div>
+      <div class="metrics" id="xattn-cells">
+        <div class="metric"><div class="metric-lbl">xattn naive · ms</div><div class="metric-val">—</div></div>
+        <div class="metric"><div class="metric-lbl">xattn fused · ms</div><div class="metric-val accent">—</div></div>
+        <div class="metric"><div class="metric-lbl">speedup</div><div class="metric-val">—</div></div>
+        <div class="metric"><div class="metric-lbl">max abs Δ</div><div class="metric-val mono" style="font-size: 12px;">—</div></div>
+      </div>
+      <p class="mono" style="color: var(--muted); font-size: 11px; margin: -20px 0 8px; letter-spacing: 0.04em;">
+        Cross-attn at SD-Turbo mid-block shape [B=2·H=20·S_q=256·S_kv=77·head=64]. Queries from the image feature map, K/V from text cond. Naive = 3 dispatches with scores [S_q × S_kv] in global memory. Fused = 1 dispatch, streaming softmax over S_kv. Called ~32× per U-Net forward pass.
+      </p>
+      <p id="xattn-interp" style="color: var(--muted); font-size: 13px; margin: 0 0 32px; max-width: 720px;">
+        Waiting for cross-attention benchmark…
+      </p>
+
+      <div class="mono" style="color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.12em; margin: 0 0 10px;">
+        v2.5.4 · fused timestep embedding · sinusoidal + 2× Linear + SiLU
+      </div>
+      <div class="metrics" id="tembed-cells">
+        <div class="metric"><div class="metric-lbl">tembed naive · ms</div><div class="metric-val">—</div></div>
+        <div class="metric"><div class="metric-lbl">tembed fused · ms</div><div class="metric-val accent">—</div></div>
+        <div class="metric"><div class="metric-lbl">speedup</div><div class="metric-val">—</div></div>
+        <div class="metric"><div class="metric-lbl">max abs Δ</div><div class="metric-val mono" style="font-size: 12px;">—</div></div>
+      </div>
+      <p class="mono" style="color: var(--muted); font-size: 11px; margin: -20px 0 8px; letter-spacing: 0.04em;">
+        Timestep embed: sinusoidal [320] → Linear [1280] → SiLU → Linear [1280]. Fires once per denoise step. Naive = 3 dispatches. Fused = 1 dispatch with both intermediates (emb 320, hidden 1280) living in workgroup memory.
+      </p>
+      <p id="tembed-interp" style="color: var(--muted); font-size: 13px; margin: 0 0 32px; max-width: 720px;">
+        Waiting for timestep-embed benchmark…
+      </p>
+
+      <div class="mono" style="color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.12em; margin: 0 0 10px;">
+        v2.5.6 · WGSL UNet · weight parser audit
+      </div>
+      <div class="metrics" id="sniff-cells">
+        <div class="metric"><div class="metric-lbl">tensors parsed</div><div class="metric-val">—</div></div>
+        <div class="metric"><div class="metric-lbl">weight bytes</div><div class="metric-val">—</div></div>
+        <div class="metric"><div class="metric-lbl">top-level groups</div><div class="metric-val">—</div></div>
+        <div class="metric"><div class="metric-lbl">parse · s</div><div class="metric-val">—</div></div>
+      </div>
+      <p class="mono" style="color: var(--muted); font-size: 11px; margin: -20px 0 8px; letter-spacing: 0.04em;">
+        End-to-end test of the hand-rolled ONNX protobuf parser against the real 1.73 GB SD-Turbo U-Net. Opt-in because it's a one-off 1.73 GB download (HTTP-cached after first run). Proves <code>onnx-parser.js</code> reads every TensorProto from the schmuell bundle without any protobuf library.
+      </p>
+      <div style="margin: 0 0 8px;">
+        <button id="sniff-btn" class="mono" style="background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 8px 14px; font-size: 12px; cursor: pointer; border-radius: 4px;">Sniff UNet schema (1.73 GB one-time)</button>
+      </div>
+      <p id="sniff-interp" style="color: var(--muted); font-size: 13px; margin: 0 0 32px; max-width: 720px;">
+        Click to fetch + parse the full U-Net and print the tensor-name tree. This is the audit step before v2.5.6 wires <code>wgslUnetForward</code> against real weights.
+      </p>
+
+      <section class="explainer" id="how">
+        <h2>How it works</h2>
+        <p>
+          Every browser Stable Diffusion today (Web-SD, ONNX Runtime Web, Transformers.js) runs
+          the denoising U-Net as <strong>dozens of kernel launches per step, times 20–50 steps</strong>.
+          On consumer GPUs the launch overhead dominates — best-in-class browser SDXL Turbo is
+          <strong>~1 second on an RTX 4090</strong>. Nobody has broken the interactive barrier.
+        </p>
+        <p>
+          Our approach: collapse the sequential path.
+        </p>
+        <div class="pipe-diagram">
+          <span class="pipe-step">text → tokens</span>
+          <span class="arrow">→</span>
+          <span class="pipe-step">CLIP embed (1 dispatch)</span>
+          <span class="arrow">→</span>
+          <span class="pipe-step hot">fused U-Net step × N</span>
+          <span class="arrow">→</span>
+          <span class="pipe-step">VAE decode (1 dispatch)</span>
+          <span class="arrow">→</span>
+          <span class="pipe-step">canvas</span>
+        </div>
+        <p>
+          The <strong>fused U-Net step</strong> is where the thesis lives: attention + GEMMs +
+          GroupNorms + SiLU + residual adds collapsed into a single-digit number of dispatches
+          per denoising step — vs. 60+ in ORT Web today. Diffusion is the textbook case where
+          1-dispatch fusion pays off, because the sequential step loop is launch-overhead-bound.
+        </p>
+      </section>
+
+      <section class="explainer" id="roadmap">
+        <h2>Roadmap</h2>
+        <p>
+          <strong>v0 — baseline (today).</strong>
+          Load SD Turbo / SDXL Turbo via ONNX Runtime Web with WebGPU backend. Measure real
+          ms/step on this device. Establishes the number we have to beat.
+        </p>
+        <p>
+          <strong>v1 — per-layer fusion.</strong>
+          Replace ORT's U-Net graph execution with our own WGSL dispatch loop. Fuse
+          attention-QKV + softmax + output-projection into one pass; fuse FFN + GELU + residual
+          into another. Target: 2–4× step speedup vs. ORT baseline on same device.
+        </p>
+        <p>
+          <strong>v2 — fused step.</strong>
+          Collapse each U-Net block into a single dispatch using persistent threads and
+          workgroup-local intermediates. Target: interactive latency (&lt;100&nbsp;ms per
+          preview refresh) on mid-range consumer GPUs.
+        </p>
+        <p>
+          <strong>v3 — shareable.</strong>
+          URL-fragment-encoded prompt + seed + model + LoRA. Zero-backend sharing, same pattern
+          as the <code>.flora</code> adapter format.
+        </p>
+      </section>
+    </main>
+
+    <footer>
+      <div>draw.instant · open source · MIT</div>
+      <div>
+        <a href="https://kernelfusion.dev">kernelfusion.dev</a> ·
+        <a href="https://gpubench.dev">gpubench.dev</a> ·
+        <a href="https://zerotvm.com">zerotvm.com</a>
+      </div>
+    </footer>
+  </div>
+
+  <script type="module" src="./pipeline.js"></script>
+</body>
+</html>

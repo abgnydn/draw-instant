@@ -1,0 +1,236 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>vae-wgsl diag</title>
+  <style>
+    body { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; margin: 24px; max-width: 1000px; }
+    pre { background: #f5f5f5; padding: 12px; border-radius: 6px; overflow: auto; white-space: pre-wrap; }
+    button { font: 13px ui-monospace; padding: 6px 12px; margin-right: 8px; }
+    #log { height: 500px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <h1>vae-wgsl diagnostic harness</h1>
+  <p>Loads vae_decoder/model.onnx (99 MB) → WGSL Executor → node-by-node diag.</p>
+  <div>
+    <button id="btn-diag">run diag</button>
+    <button id="btn-ckpt">run checkpointed (K=10, stop@zero)</button>
+    <button id="btn-ckpt1">checkpointed K=1</button>
+    <button id="btn-tiny">run tiny 8×8 (safe)</button>
+    <button id="btn-tiny3">tiny ×3 (determinism)</button>
+    <button id="btn-vsort">tiny vs ORT (numerical)</button>
+    <button id="btn-full">full 64×64 perf (1 run)</button>
+    <button id="btn-prof">profile full 64×64 (per-op ms)</button>
+    <label style="margin-left:8px"><input type="checkbox" id="cb-verbose" checked /> verbose logs</label>
+    <button id="btn-clear">clear</button>
+  </div>
+  <pre id="log"></pre>
+
+  <script type="module">
+    const log = document.getElementById('log')
+    const println = (...args) => {
+      const s = args.map(a => typeof a === 'string' ? a : JSON.stringify(a, (_, v) => typeof v === 'bigint' ? v.toString() + 'n' : v, 2)).join(' ')
+      log.textContent += s + '\n'
+      log.scrollTop = log.scrollHeight
+      console.log(...args)
+    }
+    window.__log = println
+
+    document.getElementById('btn-clear').onclick = () => { log.textContent = '' }
+
+    const setVerboseFlags = async () => {
+      const on = document.getElementById('cb-verbose').checked
+      const v = Date.now()
+      const ex = await import('./wgsl-executor.js?v=' + v)
+      const ops = await import('./wgsl-ops.js?v=' + v)
+      ex.LOG.verbose = on
+      ops.OPS_LOG.verbose = on
+      window.__WGSL_VERBOSE = on
+      println(`verbose logging: ${on ? 'ON' : 'off'}`)
+    }
+
+    const runCkpt = async (K) => {
+      try {
+        println(`importing vae-wgsl (K=${K})…`)
+        await setVerboseFlags()
+        const { loadVAEWGSL, vaeDecodeCheckpoint } = await import('./vae-wgsl.js?v=' + Date.now())
+        println('loading VAE…')
+        await loadVAEWGSL((msg, frac) => println(`  [${(frac * 100).toFixed(0)}%] ${msg}`))
+        println(`running checkpointed walk K=${K}…`)
+        const latent = new Float32Array(1 * 4 * 64 * 64)
+        for (let i = 0; i < latent.length; i++) latent[i] = (Math.random() - 0.5) * 2
+        const { stoppedAt, report } = await vaeDecodeCheckpoint(latent, { K, stopAtZero: true })
+        println('---')
+        if (stoppedAt != null) println(`STOPPED AT node ${stoppedAt} (zero/NaN output)`)
+        else println('completed without hitting zero-output')
+        // Print last ~20 entries.
+        const tail = report.slice(-20)
+        for (const r of tail) println(JSON.stringify(r))
+        window.__ckpt = report
+        println('(full: window.__ckpt)')
+      } catch (e) { println('ERROR:', e.message, e.stack) }
+    }
+    document.getElementById('btn-ckpt').onclick = () => runCkpt(10)
+    document.getElementById('btn-ckpt1').onclick = () => runCkpt(1)
+
+    const runTiny = async (repeat = 1) => {
+      try {
+        println(`importing vae-wgsl (tiny 8×8, repeat=${repeat})…`)
+        await setVerboseFlags()
+        const { loadVAEWGSL, vaeDecodeWGSL } = await import('./vae-wgsl.js?v=' + Date.now())
+        println('loading VAE…')
+        await loadVAEWGSL((msg, frac) => println(`  [${(frac * 100).toFixed(0)}%] ${msg}`))
+        const latent = new Float32Array(1 * 4 * 8 * 8)
+        // Fixed seed-ish: deterministic pattern so outputs are comparable across runs.
+        for (let i = 0; i < latent.length; i++) latent[i] = Math.sin(i * 0.37) * 2
+        const sigs = []
+        for (let r = 0; r < repeat; r++) {
+          const t0 = performance.now()
+          const out = await vaeDecodeWGSL(latent, { lH: 8, lW: 8 })
+          const dt = (performance.now() - t0).toFixed(1)
+          // Signature: sum, sumSq, first 8 values (for eyeballing determinism)
+          let s = 0, sq = 0
+          const data = out.image || out.data || out
+          for (let i = 0; i < data.length; i++) { s += data[i]; sq += data[i] * data[i] }
+          const head = Array.from(data.slice(0, 8)).map(v => v.toFixed(6)).join(',')
+          const sig = { run: r, dt_ms: dt, sum: s.toFixed(3), sumSq: sq.toFixed(3), head }
+          sigs.push(sig)
+          println(JSON.stringify(sig))
+        }
+        if (repeat > 1) {
+          const allSame = sigs.every(s => s.sum === sigs[0].sum && s.sumSq === sigs[0].sumSq && s.head === sigs[0].head)
+          println(allSame ? 'DETERMINISM: PASS (all runs bit-identical)' : 'DETERMINISM: FAIL (runs differ)')
+        }
+        window.__tiny = sigs
+      } catch (e) { println('ERROR:', e.message, e.stack) }
+    }
+    document.getElementById('btn-tiny').onclick = () => runTiny(1)
+    document.getElementById('btn-tiny3').onclick = () => runTiny(3)
+
+    document.getElementById('btn-vsort').onclick = async () => {
+      try {
+        println('loading WGSL VAE…')
+        const { loadVAEWGSL, vaeDecodeWGSL } = await import('./vae-wgsl.js?v=' + Date.now())
+        await loadVAEWGSL((msg, frac) => {})
+        println('initORT…')
+        // Unversioned: ort.js is static-imported from vae.js, versioning diverges module instances.
+        const { initORT } = await import('./ort.js')
+        await initORT(() => {})
+        println('loading ORT VAE…')
+        const { loadVAE, vaeDecode } = await import('./vae.js')
+        await loadVAE(() => {})
+        const latent = new Float32Array(1 * 4 * 8 * 8)
+        for (let i = 0; i < latent.length; i++) latent[i] = Math.sin(i * 0.37) * 2
+        println('decoding with WGSL…')
+        const t0 = performance.now()
+        const wOut = await vaeDecodeWGSL(latent, { lH: 8, lW: 8 })
+        const wMs = (performance.now() - t0).toFixed(1)
+        println(`decoding with ORT…`)
+        const t1 = performance.now()
+        const oOut = await vaeDecode(latent, { lH: 8, lW: 8 })
+        const oMs = (performance.now() - t1).toFixed(1)
+        const w = wOut.image || wOut.data || wOut
+        const o = oOut.image || oOut.data || oOut
+        if (w.length !== o.length) { println(`LENGTH MISMATCH: wgsl=${w.length} ort=${o.length}`); return }
+        let maxAbs = 0, sumSq = 0, maxIdx = 0
+        for (let i = 0; i < w.length; i++) {
+          const d = Math.abs(w[i] - o[i])
+          if (d > maxAbs) { maxAbs = d; maxIdx = i }
+          sumSq += d * d
+        }
+        const rms = Math.sqrt(sumSq / w.length)
+        println(JSON.stringify({ N: w.length, wMs, oMs, maxAbsDiff: maxAbs.toExponential(3), rms: rms.toExponential(3), worstIdx: maxIdx, wgsl_at_worst: w[maxIdx].toFixed(6), ort_at_worst: o[maxIdx].toFixed(6) }))
+        println(maxAbs < 1e-2 ? 'NUMERICAL: PASS (< 1e-2)' : (maxAbs < 1e-1 ? 'NUMERICAL: MARGINAL' : 'NUMERICAL: FAIL'))
+      } catch (e) { println('ERROR:', e.message, e.stack) }
+    }
+
+    document.getElementById('btn-full').onclick = async () => {
+      try {
+        println('CAUTION: running ONE full-scale 64×64 decode (256MB buffers). Stop if Mac fan spins hard.')
+        println('loading WGSL VAE…')
+        const { loadVAEWGSL, vaeDecodeWGSL } = await import('./vae-wgsl.js?v=' + Date.now())
+        await loadVAEWGSL((msg, frac) => {})
+        const latent = new Float32Array(1 * 4 * 64 * 64)
+        for (let i = 0; i < latent.length; i++) latent[i] = (Math.random() - 0.5) * 2
+        println('decoding WGSL full 64×64 (cold, ~warm-up)…')
+        const t0 = performance.now()
+        const out1 = await vaeDecodeWGSL(latent, { lH: 64, lW: 64 })
+        const t1 = performance.now()
+        println(`WGSL run#1 (cold): ${(t1 - t0).toFixed(1)} ms  ·  dims=${JSON.stringify(out1.dims)}`)
+        println('decoding WGSL full 64×64 (warm)…')
+        const t2 = performance.now()
+        const out2 = await vaeDecodeWGSL(latent, { lH: 64, lW: 64 })
+        const t3 = performance.now()
+        println(`WGSL run#2 (warm): ${(t3 - t2).toFixed(1)} ms`)
+        println('STOPPING HERE — 2 runs only.')
+        window.__full = { out1, out2 }
+      } catch (e) { println('ERROR:', e.message, e.stack) }
+    }
+
+    document.getElementById('btn-prof').onclick = async () => {
+      try {
+        println('loading WGSL VAE…')
+        const v = Date.now()
+        const exMod = await import('./wgsl-executor.js?v=' + v)
+        const { loadVAEWGSL, vaeDecodeWGSL } = await import('./vae-wgsl.js?v=' + v)
+        await loadVAEWGSL((msg, frac) => {})
+        // warm-up run (unprofiled)
+        const latent = new Float32Array(1 * 4 * 64 * 64)
+        for (let i = 0; i < latent.length; i++) latent[i] = (Math.random() - 0.5) * 2
+        println('warm-up run (no profile)…')
+        await vaeDecodeWGSL(latent, { lH: 64, lW: 64 })
+        // profile run
+        exMod.LOG.profile = true
+        exMod.LOG.profileData = []
+        println('profiled run (submit+await per op)…')
+        const t0 = performance.now()
+        await vaeDecodeWGSL(latent, { lH: 64, lW: 64 })
+        const dt = performance.now() - t0
+        exMod.LOG.profile = false
+        const data = exMod.LOG.profileData
+        // Aggregate per op_type, and per op+dims bucket.
+        const byOp = new Map()
+        for (const r of data) {
+          const d = byOp.get(r.op) || { op: r.op, count: 0, total: 0, max: 0, worstDims: null }
+          d.count++; d.total += r.ms
+          if (r.ms > d.max) { d.max = r.ms; d.worstDims = r.dims }
+          byOp.set(r.op, d)
+        }
+        const sorted = [...byOp.values()].sort((a, b) => b.total - a.total)
+        println(`profiled wall time: ${dt.toFixed(1)} ms  ·  ${data.length} GPU ops`)
+        println('=== by op_type, sorted by total ms ===')
+        for (const d of sorted) {
+          println(`${d.op.padEnd(16)} n=${String(d.count).padStart(3)}  total=${d.total.toFixed(1).padStart(8)} ms  avg=${(d.total / d.count).toFixed(1).padStart(6)} ms  max=${d.max.toFixed(1).padStart(6)} ms  worstDims=${JSON.stringify(d.worstDims)}`)
+        }
+        println('--- top 10 slowest individual ops ---')
+        const top = [...data].sort((a, b) => b.ms - a.ms).slice(0, 10)
+        for (const r of top) println(`@${String(r.ni).padStart(3)} ${r.op.padEnd(14)} ${r.ms.toFixed(1).padStart(6)} ms  dims=${JSON.stringify(r.dims)}  name=${r.name}`)
+        window.__prof = data
+      } catch (e) { println('ERROR:', e.message, e.stack) }
+    }
+
+    document.getElementById('btn-diag').onclick = async () => {
+      try {
+        println('importing vae-wgsl…')
+        await setVerboseFlags()
+        const { loadVAEWGSL, vaeDecodeDiag } = await import('./vae-wgsl.js?v=' + Date.now())
+        println('loading VAE (99 MB)…')
+        await loadVAEWGSL((msg, frac) => println(`  [${(frac * 100).toFixed(0)}%] ${msg}`))
+        println('running diag on random latent [1,4,64,64]…')
+        const latent = new Float32Array(1 * 4 * 64 * 64)
+        for (let i = 0; i < latent.length; i++) latent[i] = (Math.random() - 0.5) * 2
+        const report = await vaeDecodeDiag(latent, { maxNodes: 525 })
+        println('---')
+        println(`total nodes: ${report.totalNodes}  ·  ran: ${report.ran}`)
+        const last = report.diag[report.diag.length - 1]
+        println('last diag entry:', last)
+        window.__report = report
+        println('(full report: window.__report)')
+      } catch (e) {
+        println('ERROR:', e.message, e.stack)
+      }
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,56 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>vae-wgsl diag</title>
+  <style>
+    body { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; margin: 24px; max-width: 1000px; }
+    pre { background: #f5f5f5; padding: 12px; border-radius: 6px; overflow: auto; white-space: pre-wrap; }
+    button { font: 13px ui-monospace; padding: 6px 12px; margin-right: 8px; }
+    #log { height: 500px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <h1>vae-wgsl diagnostic harness</h1>
+  <p>Loads vae_decoder/model.onnx (99 MB) → WGSL Executor → node-by-node diag.</p>
+  <div>
+    <button id="btn-diag">run diag</button>
+    <button id="btn-clear">clear</button>
+  </div>
+  <pre id="log"></pre>
+
+  <script type="module">
+    const log = document.getElementById('log')
+    const println = (...args) => {
+      const s = args.map(a => typeof a === 'string' ? a : JSON.stringify(a, (_, v) => typeof v === 'bigint' ? v.toString() + 'n' : v, 2)).join(' ')
+      log.textContent += s + '\n'
+      log.scrollTop = log.scrollHeight
+      console.log(...args)
+    }
+    window.__log = println
+
+    document.getElementById('btn-clear').onclick = () => { log.textContent = '' }
+
+    document.getElementById('btn-diag').onclick = async () => {
+      try {
+        println('importing vae-wgsl…')
+        const { loadVAEWGSL, vaeDecodeDiag } = await import('./vae-wgsl.js')
+        println('loading VAE (99 MB)…')
+        await loadVAEWGSL((msg, frac) => println(`  [${(frac * 100).toFixed(0)}%] ${msg}`))
+        println('running diag on random latent [1,4,64,64]…')
+        const latent = new Float32Array(1 * 4 * 64 * 64)
+        for (let i = 0; i < latent.length; i++) latent[i] = (Math.random() - 0.5) * 2
+        const report = await vaeDecodeDiag(latent, { maxNodes: 525 })
+        println('---')
+        println(`total nodes: ${report.totalNodes}  ·  ran: ${report.ran}`)
+        const last = report.diag[report.diag.length - 1]
+        println('last diag entry:', last)
+        window.__report = report
+        println('(full report: window.__report)')
+      } catch (e) {
+        println('ERROR:', e.message, e.stack)
+      }
+    }
+  </script>
+</body>
+</html>

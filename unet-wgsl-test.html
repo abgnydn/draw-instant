@@ -1,0 +1,211 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>unet-wgsl diag</title>
+  <style>
+    body { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; margin: 24px; max-width: 1000px; }
+    pre { background: #f5f5f5; padding: 12px; border-radius: 6px; overflow: auto; white-space: pre-wrap; }
+    button { font: 13px ui-monospace; padding: 6px 12px; margin-right: 8px; margin-bottom: 4px; }
+    #log { height: 500px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <h1>unet-wgsl diagnostic harness (SD-Turbo)</h1>
+  <p>Loads unet/model.onnx (~1.65 GB, from HF cache after first load) → WGSL Executor → node-by-node probe.</p>
+  <div>
+    <button id="btn-load">load UNet (parse + device + fuse)</button>
+    <button id="btn-tiny">tiny 8×8 forward</button>
+    <button id="btn-ckpt25">checkpoint K=25 (stop@zero)</button>
+    <button id="btn-ckpt1">checkpoint K=1 (fine-grained)</button>
+    <button id="btn-full">full 64×64 forward</button>
+    <button id="btn-parity">ORT parity (8×8)</button>
+    <label style="margin-left:8px"><input type="checkbox" id="cb-verbose" /> verbose logs</label>
+    <button id="btn-clear">clear</button>
+  </div>
+  <pre id="log"></pre>
+
+  <script type="module">
+    const log = document.getElementById('log')
+    const println = (...args) => {
+      const s = args.map(a => typeof a === 'string' ? a : JSON.stringify(a, (_, v) => typeof v === 'bigint' ? v.toString() + 'n' : v, 2)).join(' ')
+      log.textContent += s + '\n'
+      log.scrollTop = log.scrollHeight
+      console.log(...args)
+    }
+    window.__log = println
+
+    document.getElementById('btn-clear').onclick = () => { log.textContent = '' }
+
+    // Single version per page load so every button reuses the same module
+    // (and its cached _state). Reload the page to bust the cache.
+    const _V = Date.now()
+    const V = () => _V
+    const setVerbose = async (v) => {
+      const on = document.getElementById('cb-verbose').checked
+      const ex = await import('./wgsl-executor.js?v=' + v)
+      const ops = await import('./wgsl-ops.js?v=' + v)
+      ex.LOG.verbose = on
+      ops.OPS_LOG.verbose = on
+      println(`verbose: ${on ? 'ON' : 'off'}`)
+    }
+
+    // Deterministic seeds so runs are reproducible.
+    const seedArr = (len, salt = 1) => {
+      const a = new Float32Array(len)
+      for (let i = 0; i < len; i++) a[i] = Math.sin(i * 0.37 + salt) * 2
+      return a
+    }
+    const makeInputs = (H, W) => ({
+      sample: seedArr(1 * 4 * H * W, 1),
+      timestep: 999, // SD-Turbo uses a single high-noise step
+      cond: seedArr(1 * 77 * 1024, 2),
+      H, W,
+    })
+
+    document.getElementById('btn-load').onclick = async () => {
+      const v = V()
+      await setVerbose(v)
+      try {
+        const mod = await import('./unet-wgsl.js?v=' + v)
+        const t0 = performance.now()
+        const state = await mod.loadUNetWGSL((msg, frac) => println(`  [${(frac * 100).toFixed(0)}%] ${msg}`))
+        const ms = performance.now() - t0
+        println(`loaded in ${ms.toFixed(0)} ms · ${state.graph.nodes.length} nodes · ${state.graph.tensors.size} tensors · ${(state.bytes / 1024 / 1024).toFixed(0)} MB weights`)
+        println(`graph inputs: ${state.graph.inputs.map(i => `${i.name}[${i.dims}]`).join(', ')}`)
+        println(`graph outputs: ${state.graph.outputs.map(o => `${o.name}[${o.dims}]`).join(', ')}`)
+        const names = mod.findUNetInputNames(state.executor)
+        const outName = mod.findUNetOutputName(state.executor)
+        println(`resolved: sample=${names.sample} timestep=${names.timestep} cond=${names.cond} out=${outName}`)
+        window.__unetState = state
+      } catch (e) { println('ERR', e.message); console.error(e) }
+    }
+
+    document.getElementById('btn-tiny').onclick = async () => {
+      const v = V()
+      await setVerbose(v)
+      try {
+        const mod = await import('./unet-wgsl.js?v=' + v)
+        await mod.loadUNetWGSL((m, f) => println(`  [${(f * 100).toFixed(0)}%] ${m}`))
+        const { sample, timestep, cond, H, W } = makeInputs(8, 8)
+        println('forward tiny 8×8…')
+        const r = await mod.unetForwardWGSL(sample, timestep, cond, { B: 1, H, W })
+        let sum = 0, sumSq = 0, nz = 0
+        for (let i = 0; i < r.out.length; i++) { sum += r.out[i]; sumSq += r.out[i] * r.out[i]; if (r.out[i] !== 0) nz++ }
+        println(`out dims=${JSON.stringify(r.dims)} numel=${r.out.length} nz=${nz} sum=${sum.toFixed(3)} sumSq=${sumSq.toFixed(3)}`)
+        println(`head: ${Array.from(r.out.slice(0, 8)).map(x => x.toFixed(4)).join(', ')}`)
+        println(`ms=${r.ms.toFixed(1)}`)
+      } catch (e) { println('ERR', e.message); console.error(e) }
+    }
+
+    const runCkpt = async (K) => {
+      const v = V()
+      await setVerbose(v)
+      try {
+        const mod = await import('./unet-wgsl.js?v=' + v)
+        await mod.loadUNetWGSL((m, f) => println(`  [${(f * 100).toFixed(0)}%] ${m}`))
+        const { sample, timestep, cond, H, W } = makeInputs(8, 8)
+        println(`checkpoint walk K=${K} on tiny 8×8…`)
+        const { report, lastGpuNode } = await mod.unetCheckpointWGSL(sample, timestep, cond, { K, B: 1, H, W, stopAt: 6000 })
+        for (const r of report) {
+          if (r.err) println(`@${r.ni} ${r.op_type.padEnd(24)} ${r.name}  ERR: ${r.err}`)
+          else println(`@${r.ni} ${r.op_type.padEnd(24)} dims=${JSON.stringify(r.dims)} nz=${r.nz}/${r.n} nan=${r.nan} absmx=${r.absmx.toFixed(4)}`)
+        }
+        println(`lastGpuNode=${lastGpuNode}`)
+      } catch (e) { println('ERR', e.message); console.error(e) }
+    }
+    document.getElementById('btn-ckpt25').onclick = () => runCkpt(25)
+    document.getElementById('btn-ckpt1').onclick = () => runCkpt(1)
+
+    document.getElementById('btn-parity').onclick = async () => {
+      const v = V()
+      await setVerbose(v)
+      try {
+        const mod = await import('./unet-wgsl.js?v=' + v)
+        await mod.loadUNetWGSL((m, f) => println(`  [${(f * 100).toFixed(0)}%] ${m}`))
+        const { sample, timestep, cond, H, W } = makeInputs(8, 8)
+
+        // --- WGSL forward ---
+        println('WGSL forward 8×8…')
+        const tw0 = performance.now()
+        const rw = await mod.unetForwardWGSL(sample, timestep, cond, { B: 1, H, W })
+        println(`  WGSL out dims=${JSON.stringify(rw.dims)} ms=${rw.ms.toFixed(1)}`)
+
+        // --- ORT forward ---
+        println('ORT init + session…')
+        const { initORT, getORT } = await import('./ort.js?v=' + v)
+        await initORT(m => println(`  ort: ${m}`))
+        const ort = getORT()
+        // Use the exact URL the WGSL executor loaded from — otherwise ORT
+        // may fetch a different-size local file and we'd be comparing two
+        // different models (fp16 vs fp32 variants, etc).
+        const ortUrl = mod.getUNetSourceUrl() || './unet.onnx'
+        println(`  ORT fetching ${ortUrl}…`)
+        const t0 = performance.now()
+        const res = await fetch(ortUrl)
+        if (!res.ok) throw new Error(`fetch ${ortUrl} → ${res.status}`)
+        const bytes = new Uint8Array(await res.arrayBuffer())
+        println(`  loaded ${(bytes.byteLength/1024/1024).toFixed(0)} MB in ${(performance.now()-t0).toFixed(0)} ms`)
+        const ts0 = performance.now()
+        const session = await ort.InferenceSession.create(bytes, { executionProviders: ['webgpu', 'wasm'] })
+        println(`  session created in ${(performance.now()-ts0).toFixed(0)} ms · inputs=${session.inputNames} outputs=${session.outputNames}`)
+
+        const feeds = {}
+        for (const name of session.inputNames) {
+          if (name === 'sample') feeds[name] = new ort.Tensor('float32', sample, [1, 4, H, W])
+          else if (name === 'timestep') feeds[name] = new ort.Tensor('int64', BigInt64Array.from([BigInt(timestep)]), [1])
+          else if (name === 'encoder_hidden_states') feeds[name] = new ort.Tensor('float32', cond, [1, 77, 1024])
+          else throw new Error(`unknown ORT UNet input: ${name}`)
+        }
+        println('ORT forward 8×8…')
+        const to0 = performance.now()
+        const ortOut = await session.run(feeds)
+        const ortMs = performance.now() - to0
+        const outName = session.outputNames[0]
+        const raw = ortOut[outName].data
+        const ro = raw instanceof Float32Array ? raw : new Float32Array(raw)
+        println(`  ORT out dims=${JSON.stringify(ortOut[outName].dims)} len=${ro.length} ms=${ortMs.toFixed(1)}`)
+
+        // --- Diff ---
+        if (ro.length !== rw.out.length) {
+          println(`LENGTH MISMATCH: ORT=${ro.length} WGSL=${rw.out.length}`)
+          return
+        }
+        let maxAbs = 0, sumAbs = 0, sumSq = 0, dot = 0, ortSq = 0, wgSq = 0
+        let worstIdx = -1
+        for (let i = 0; i < ro.length; i++) {
+          const d = Math.abs(rw.out[i] - ro[i])
+          sumAbs += d; sumSq += d * d
+          if (d > maxAbs) { maxAbs = d; worstIdx = i }
+          dot += rw.out[i] * ro[i]
+          ortSq += ro[i] * ro[i]
+          wgSq += rw.out[i] * rw.out[i]
+        }
+        const n = ro.length
+        const rmse = Math.sqrt(sumSq / n)
+        const cos = dot / (Math.sqrt(ortSq) * Math.sqrt(wgSq))
+        println(`PARITY: max|Δ|=${maxAbs.toExponential(3)} mean|Δ|=${(sumAbs/n).toExponential(3)} rmse=${rmse.toExponential(3)} cos=${cos.toFixed(6)}`)
+        println(`worst @${worstIdx}: wgsl=${rw.out[worstIdx].toFixed(4)} ort=${ro[worstIdx].toFixed(4)}`)
+        println(`wgsl head: ${Array.from(rw.out.slice(0, 8)).map(x => x.toFixed(4)).join(', ')}`)
+        println(`ort  head: ${Array.from(ro.slice(0, 8)).map(x => x.toFixed(4)).join(', ')}`)
+        if (maxAbs < 1e-3) println('✓ PARITY OK (max|Δ| < 1e-3)')
+        else if (maxAbs < 1e-2) println('~ near-parity (1e-3 < max|Δ| < 1e-2) — likely fp precision')
+        else println('✗ DIVERGES (max|Δ| ≥ 1e-2) — real bug somewhere')
+      } catch (e) { println('ERR', e.message); console.error(e) }
+    }
+
+    document.getElementById('btn-full').onclick = async () => {
+      const v = V()
+      await setVerbose(v)
+      try {
+        const mod = await import('./unet-wgsl.js?v=' + v)
+        await mod.loadUNetWGSL((m, f) => println(`  [${(f * 100).toFixed(0)}%] ${m}`))
+        const { sample, timestep, cond, H, W } = makeInputs(64, 64)
+        println('forward full 64×64…')
+        const r = await mod.unetForwardWGSL(sample, timestep, cond, { B: 1, H, W })
+        println(`out dims=${JSON.stringify(r.dims)} ms=${r.ms.toFixed(1)}`)
+      } catch (e) { println('ERR', e.message); console.error(e) }
+    }
+  </script>
+</body>
+</html>
