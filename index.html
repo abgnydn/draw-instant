@@ -2,32 +2,6 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <script>
-    // TEMP DIAGNOSTIC: capture stack at every failing createBindGroup.
-    (function(){
-      if (!navigator.gpu) return;
-      const origRA = navigator.gpu.requestAdapter.bind(navigator.gpu);
-      navigator.gpu.requestAdapter = async function(...a){
-        const ad = await origRA(...a);
-        if (!ad) return ad;
-        const origRD = ad.requestDevice.bind(ad);
-        ad.requestDevice = async function(...b){
-          const dev = await origRD(...b);
-          dev.addEventListener('uncapturederror', (e) => {
-            console.error('[WGPU UNCAPTURED]', e.error && e.error.message, '\n', window.__lastCBGStack || '(no stack captured)');
-          });
-          const origCBG = dev.createBindGroup.bind(dev);
-          dev.createBindGroup = function(desc){
-            window.__lastCBGStack = new Error('cbg-callsite').stack;
-            const bg = origCBG(desc);
-            return bg;
-          };
-          return dev;
-        };
-        return ad;
-      };
-    })();
-  </script>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>draw.instant — AI image generation that updates as you type</title>
   <meta name="description" content="Real-time image generation in your browser. 100% on-device. No server, no login, no upload. Powered by WebGPU kernel fusion." />

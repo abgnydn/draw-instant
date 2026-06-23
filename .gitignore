@@ -1,0 +1,4 @@
+# Local dev artifact: the test harness creates a local unet.onnx (symlink or
+# copy) to skip re-downloading the 1.65 GB model. loadUNetWGSL() falls back to
+# the HuggingFace URL when it's absent, so this never needs to be committed.
+unet.onnx
