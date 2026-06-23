@@ -35,6 +35,10 @@ The first block printed is the adapter. If it says `llvmpipe` / `lavapipe` /
 
 ## Colab (NVIDIA T4 — best effort)
 
+**One click:** open [`bench-colab.ipynb`](https://colab.research.google.com/github/abgnydn/draw-instant/blob/claude/admiring-feynman-nbo17d/bench-colab.ipynb)
+in Colab and **Runtime → Run all** (it already requests a GPU runtime). The cells
+below are the same recipe, explained.
+
 Colab gives a discrete GPU (usually a T4), so in principle: yes. The catch is
 **not** the GPU, it's exposing it to Vulkan — Colab ships Mesa (CPU `llvmpipe`),
 and the NVIDIA Vulkan ICD only appears once you install the `libnvidia-gl`
