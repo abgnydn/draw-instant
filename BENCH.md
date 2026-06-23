@@ -8,7 +8,13 @@ The fusion benchmarks (`bench.js`, `fused-*.js`) are pure WebGPU: they touch onl
 `navigator.gpu` and `performance.now()`, never the DOM. So they run under
 **Deno's native WebGPU (wgpu)** with no browser. `bench-headless.mjs` drives all
 nine and prints the numbers — and the GPU adapter first, so a CPU-software
-fallback can't masquerade as a real result.
+fallback (llvmpipe / lavapipe / SwiftShader) can't masquerade as a real result.
+
+> Reality check: the browser isn't the hard part — the GPU's Vulkan driver is.
+> That setup is the same work whether you drive it from Deno or headless Chrome;
+> Deno just saves you a page harness. See the headless-Chrome note at the bottom
+> for the path that most closely matches what real users get (Chrome ships Dawn,
+> not wgpu).
 
 ## Run on any GPU machine (the reliable path)
 
@@ -23,27 +29,33 @@ deno run --unstable-webgpu -A bench-headless.mjs fusion   # just one (substring 
 
 The first block printed is the adapter. If it says `llvmpipe` / `lavapipe` /
 `swiftshader`, you're on CPU emulation — the script warns, and the numbers are
-**not** a GPU result. Fix the driver before trusting anything below it.
+**not** a GPU result. Force a specific backend/adapter with Deno's env vars:
+`DENO_WEBGPU_BACKEND=vulkan` and `DENO_WEBGPU_ADAPTER_NAME=<substring>` (e.g.
+`tesla`, `radeon`, `4090`).
 
 ## Colab (NVIDIA T4 — best effort)
 
 Colab gives a discrete GPU (usually a T4), so in principle: yes. The catch is
-**not** the GPU, it's getting wgpu's Vulkan backend to bind it — Colab images
-ship Mesa (CPU `llvmpipe`) and not always the NVIDIA Vulkan ICD. Paste these into
-cells; the adapter banner tells you immediately whether it worked.
+**not** the GPU, it's exposing it to Vulkan — Colab ships Mesa (CPU `llvmpipe`),
+and the NVIDIA Vulkan ICD only appears once you install the `libnvidia-gl`
+package **whose major version matches the running driver** (`nvidia-smi`). That
+package provides both `libGLX_nvidia.so.0` and the ICD JSON; a version mismatch
+makes `vulkaninfo` fail. The adapter banner tells you immediately if it worked.
 
 ```python
 # 1. Confirm a GPU runtime (Runtime → Change runtime type → GPU)
-!nvidia-smi -L
+!nvidia-smi --query-gpu=name,driver_version --format=csv
 ```
 
 ```python
-# 2. Vulkan + register the NVIDIA ICD (the driver ships libGLX_nvidia)
-!apt-get -qq update && apt-get -qq install -y vulkan-tools libvulkan1 > /dev/null
-!mkdir -p /usr/share/vulkan/icd.d
-!printf '{"file_format_version":"1.0.0","ICD":{"library_path":"libGLX_nvidia.so.0","api_version":"1.3"}}' \
-    > /usr/share/vulkan/icd.d/nvidia_icd.json
-# Must list an NVIDIA device — if it only shows llvmpipe, the GPU path failed.
+# 2. Install the NVIDIA Vulkan ICD matching the driver major version.
+import subprocess
+drv = subprocess.check_output(
+    "nvidia-smi --query-gpu=driver_version --format=csv,noheader",
+    shell=True).decode().strip().split(".")[0]
+print("driver major:", drv)
+!apt-get -qq update && apt-get -qq install -y vulkan-tools libnvidia-gl-{drv} > /dev/null
+# Must list the Tesla T4 — if it only shows llvmpipe, the version didn't match.
 !vulkaninfo --summary 2>/dev/null | grep -iE "deviceName|driverName" || echo "no Vulkan device"
 ```
 
@@ -54,13 +66,26 @@ import os; os.environ["PATH"] = f"/root/.deno/bin:{os.environ['PATH']}"
 ```
 
 ```python
-# 4. Clone this branch and run. WGPU_BACKEND=vulkan forces the GPU backend.
+# 4. Clone this branch and run. DENO_WEBGPU_BACKEND=vulkan forces the GPU path;
+#    add DENO_WEBGPU_ADAPTER_NAME=tesla if the banner still shows llvmpipe.
 !git clone -q -b claude/admiring-feynman-nbo17d https://github.com/abgnydn/draw-instant
-!cd draw-instant && WGPU_BACKEND=vulkan deno run --unstable-webgpu -A bench-headless.mjs
+!cd draw-instant && DENO_WEBGPU_BACKEND=vulkan deno run --unstable-webgpu -A bench-headless.mjs
 ```
 
 If the banner shows the T4, the numbers are real. A T4 is a datacenter card, not
 the "mid-range consumer laptop" the roadmap's metric targets — but it directly
 answers the core question: does fusion beat per-dispatch overhead on a real GPU.
-If the banner shows `llvmpipe`, step 2's ICD didn't take; the cleanest fallback
-is any cloud VM with a consumer GPU, or a real laptop, using the command above.
+
+## Most-representative path: headless Chrome (Dawn)
+
+The product ships in a browser, and Chrome implements WebGPU via **Dawn**, not
+wgpu — so for numbers that match what users actually get, drive the page in
+headless Chrome. Google documents this exact Colab setup, and there's a
+maintained reference repo. Gotcha: Dawn blocklists NVIDIA driver 570+ by default
+(override via Dawn flags), and Chrome needs `--enable-unsafe-webgpu
+--use-angle=vulkan --enable-features=Vulkan`. It's more setup than Deno, so it's
+the follow-up once Deno gives us a first signal.
+
+- Chrome for Developers: "Web AI model testing in Google Colab"
+  <https://developer.chrome.com/docs/web-platform/webgpu/colab-headless>
+- Reference repo: `jasonmayes/headless-chrome-nvidia-t4-gpu-support`
