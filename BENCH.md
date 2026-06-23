@@ -80,6 +80,27 @@ If the banner shows the T4, the numbers are real. A T4 is a datacenter card, not
 the "mid-range consumer laptop" the roadmap's metric targets — but it directly
 answers the core question: does fusion beat per-dispatch overhead on a real GPU.
 
+## Real GPU from a cloud session (Modal — API-driven, no browser)
+
+The Colab paths above both need a browser (the notebook UI, or colab-mcp's
+localhost bridge). To get numbers from a **headless** cloud session — e.g. an
+agent in Claude Code on the web — use [`modal_bench.py`](modal_bench.py), which
+runs the same benches on a Modal GPU over an API:
+
+```sh
+pip install modal && modal token new       # one-time (or set MODAL_TOKEN_ID/SECRET)
+modal run modal_bench.py                    # all benches on a T4
+modal run modal_bench.py --filter fusion    # one bench (substring match)
+BENCH_GPU=A10G modal run modal_bench.py     # a different GPU
+```
+
+It mirrors the Colab recipe — match `libnvidia-gl-<driver-major>` to the running
+driver to expose the NVIDIA Vulkan ICD — but installs that lib at *runtime*,
+since Modal only injects the GPU driver when the function starts. Same caveat: if
+`vulkaninfo` (printed before the numbers) shows no device, the adapter banner
+says `llvmpipe` and it's CPU emulation. Unlike Colab, that's debuggable from the
+cloud session itself, because the whole thing is API-driven.
+
 ## Most-representative path: headless Chrome (Dawn)
 
 The product ships in a browser, and Chrome implements WebGPU via **Dawn**, not
