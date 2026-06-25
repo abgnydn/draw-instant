@@ -1,0 +1,20 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    name: parser round-trip
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      # No dependencies and no build step — the ONNX parser test is pure Node.
+      # WGSL kernel tests need a real GPU and run in the browser (see CONTRIBUTING).
+      - name: Run tests
+        run: npm test

@@ -1,0 +1,31 @@
+cff-version: 1.2.0
+message: "If you use draw.instant in your research, please cite it as below."
+title: "draw.instant: real-time on-device Stable Diffusion in the browser via WebGPU kernel fusion"
+abstract: >-
+  draw.instant runs Stable Diffusion Turbo entirely in the browser on WebGPU,
+  targeting interactive ("as-you-type") latency by collapsing the U-Net
+  denoising loop from dozens of GPU kernel launches per step into a handful of
+  fused WGSL dispatches. It ships a from-scratch WebGPU inference stack — a
+  byte-level ONNX parser, a WGSL op-kernel library, and a graph executor — with
+  no dependence on ONNX Runtime for the fused path, and a live on-device
+  benchmark suite.
+type: software
+authors:
+  - family-names: Gunaydin
+    given-names: Baris
+    email: abgunaydin94@gmail.com
+repository-code: "https://github.com/abgnydn/draw-instant"
+url: "https://github.com/abgnydn/draw-instant"
+license: MIT
+version: 1.2.0
+date-released: "2026-06-25"
+keywords:
+  - WebGPU
+  - WGSL
+  - kernel fusion
+  - Stable Diffusion
+  - SD-Turbo
+  - diffusion models
+  - on-device inference
+  - in-browser machine learning
+  - ONNX
