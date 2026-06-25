@@ -1,0 +1,38 @@
+{
+  "name": "draw-instant",
+  "version": "1.2.0",
+  "description": "Real-time, 100% on-device Stable Diffusion in the browser via WebGPU kernel fusion.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "python3 -m http.server 8787",
+    "dev": "python3 -m http.server 8787",
+    "test": "node onnx-parser-test.mjs",
+    "scope": "node scope-nodes.mjs"
+  },
+  "keywords": [
+    "webgpu",
+    "wgsl",
+    "stable-diffusion",
+    "sd-turbo",
+    "kernel-fusion",
+    "onnx",
+    "diffusion",
+    "in-browser",
+    "on-device",
+    "generative-ai"
+  ],
+  "author": "Baris Gunaydin",
+  "license": "MIT",
+  "homepage": "https://github.com/abgnydn/draw-instant#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/abgnydn/draw-instant.git"
+  },
+  "bugs": {
+    "url": "https://github.com/abgnydn/draw-instant/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
