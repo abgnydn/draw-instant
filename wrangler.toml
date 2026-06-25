@@ -1,14 +1,16 @@
-# Cloudflare Pages configuration for draw.instant.
+# Cloudflare Workers (static assets) configuration for draw.instant.
 #
 # This is a no-build static site: index.html + hand-authored ES modules at the
-# repo root. There is nothing to compile, so the "build output directory" is the
-# repo root itself. Model weights (*.onnx) are git-ignored and fetched from
-# Hugging Face at runtime — they are never deployed (and exceed Pages' 25 MB/file
-# limit anyway).
+# repo root, served as Workers static assets with no Worker script (`main` is
+# intentionally omitted — assets-only). Model weights (*.onnx) are git-ignored
+# and streamed from Hugging Face at runtime, so they're never deployed.
 #
-# Used by:  npm run deploy   and   .github/workflows/deploy.yml
-# See DEPLOY.md for the one-time project-creation steps.
+# Deploy:  npm run deploy  (→ npx wrangler deploy)  — or Cloudflare's Git build,
+# which runs the same `wrangler deploy` on every push to the production branch.
+# `.assetsignore` trims the uploaded file set. See DEPLOY.md.
 
 name = "draw-instant"
 compatibility_date = "2026-06-25"
-pages_build_output_dir = "."
+
+[assets]
+directory = "."

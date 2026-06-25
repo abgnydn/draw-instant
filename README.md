@@ -5,7 +5,7 @@
 **Real Stable Diffusion, in a browser tab. Open a URL and generate — the actual
 U-Net denoiser, computed on your own GPU, in the tab. No server, no upload.**
 
-[![live](https://img.shields.io/badge/live-draw--instant.pages.dev-ff5a1f?style=flat-square&labelColor=0a0a0a)](https://draw-instant.pages.dev)
+[![live](https://img.shields.io/badge/live-Cloudflare%20Workers-ff5a1f?style=flat-square&labelColor=0a0a0a)](./DEPLOY.md)
 [![version](https://img.shields.io/badge/version-1.2.0-8a8a8a?style=flat-square&labelColor=0a0a0a)](./CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-4ade80?style=flat-square&labelColor=0a0a0a)](./LICENSE)
 [![tests](https://img.shields.io/github/actions/workflow/status/abgnydn/draw-instant/ci.yml?style=flat-square&labelColor=0a0a0a&label=tests)](https://github.com/abgnydn/draw-instant/actions/workflows/ci.yml)
@@ -58,9 +58,9 @@ U-Net denoiser, computed on your own GPU, in the tab. No server, no upload.**
 
 ## See it
 
-**Live demo → [draw-instant.pages.dev](https://draw-instant.pages.dev)**
-(Cloudflare Pages; see [DEPLOY.md](./DEPLOY.md) to publish it). Or run it locally
-in [60 seconds](#60-second-start).
+**Live demo → deployed on Cloudflare Workers**
+(`draw-instant.<your-subdomain>.workers.dev`; see [DEPLOY.md](./DEPLOY.md)). Or
+run it locally in [60 seconds](#60-second-start).
 
 The page opens with a generate panel and a column of live benchmark cards.
 
@@ -255,7 +255,7 @@ The non-negotiables (full text in [CONTRIBUTING.md](./CONTRIBUTING.md)):
 | [ROADMAP.md](./ROADMAP.md) | the v0→v5 product trajectory |
 | [CHANGELOG.md](./CHANGELOG.md) | version history |
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | principles, dev setup, test workflow |
-| [DEPLOY.md](./DEPLOY.md) | publish to Cloudflare Pages (`draw-instant.pages.dev`) |
+| [DEPLOY.md](./DEPLOY.md) | publish to Cloudflare Workers (static assets) |
 | [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) | community expectations |
 
 ---

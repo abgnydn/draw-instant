@@ -9,7 +9,7 @@
     "dev": "python3 -m http.server 8787",
     "test": "node onnx-parser-test.mjs",
     "scope": "node scope-nodes.mjs",
-    "deploy": "npx wrangler pages deploy . --project-name=draw-instant"
+    "deploy": "npx wrangler deploy"
   },
   "keywords": [
     "webgpu",
@@ -25,7 +25,7 @@
   ],
   "author": "Baris Gunaydin",
   "license": "MIT",
-  "homepage": "https://draw-instant.pages.dev",
+  "homepage": "https://github.com/abgnydn/draw-instant#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/abgnydn/draw-instant.git"
