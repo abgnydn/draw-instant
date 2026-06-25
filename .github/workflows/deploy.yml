@@ -1,0 +1,42 @@
+name: deploy
+
+# Deploys the static site to Cloudflare Pages (draw-instant.pages.dev) on every
+# push to master. Until the two repo secrets exist the job cleanly skips (green,
+# not red) — see DEPLOY.md for setup. If you instead connect the repo through the
+# Cloudflare Pages dashboard (Git integration), you don't need this workflow at
+# all; Cloudflare builds on its side.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  deployments: write
+
+jobs:
+  pages:
+    name: Cloudflare Pages
+    runs-on: ubuntu-latest
+    env:
+      CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - name: Require Cloudflare secrets
+        id: guard
+        run: |
+          if [ -z "$CF_API_TOKEN" ]; then
+            echo "::notice::CLOUDFLARE_API_TOKEN not set — skipping deploy. See DEPLOY.md."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.guard.outputs.skip != 'true'
+
+      - name: Deploy to Cloudflare Pages
+        if: steps.guard.outputs.skip != 'true'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy . --project-name=draw-instant
