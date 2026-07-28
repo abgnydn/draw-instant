@@ -112,6 +112,10 @@
     }
     canvas#view { display: block; width: 100%; height: 100%; image-rendering: auto; }
     .canvas-placeholder {
+      /* Overlay, not a flex sibling — as a sibling it competed with the canvas
+         for width, shoving the canvas off-centre and clipping this text. */
+      position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
       color: var(--dim); font-size: 13px; text-align: center; padding: 20px;
       font-family: 'JetBrains Mono', ui-monospace, monospace;
     }
