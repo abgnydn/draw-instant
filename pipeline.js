@@ -1115,9 +1115,10 @@ async function runProbe() {
     // Render interpretation below the metrics.
     const interp = document.getElementById('probe-interp')
     if (interp) {
+      const probeDelta = ` Correctness: ${r.correctness.maxAbsDiff.toExponential(1)} max abs diff between the two paths.`
       interp.innerHTML = fusedWins
-        ? `<strong>Fusion wins on this device.</strong> Dispatch overhead + intermediate memory traffic are measurable; the 1-dispatch path skips both. This is the regime where diffusion U-Net fusion will pay off.`
-        : `<strong>Naive is competitive here.</strong> This backend has very low dispatch overhead and (likely) unified memory — so intermediate scratch writes don't cost much for a 4MB buffer. The thesis still holds for <em>larger</em> memory-bound chains (big matmuls, full attention blocks) and for discrete GPUs under Vulkan/D3D. The interactive-diffusion win is about those.`
+        ? `<strong>Fusion wins on this device.</strong> Dispatch overhead + intermediate memory traffic are measurable; the 1-dispatch path skips both. This is the regime where diffusion U-Net fusion will pay off.${probeDelta}`
+        : `<strong>Naive is competitive here.</strong> This backend has very low dispatch overhead and (likely) unified memory — so intermediate scratch writes don't cost much for a 4MB buffer. The thesis still holds for <em>larger</em> memory-bound chains (big matmuls, full attention blocks) and for discrete GPUs under Vulkan/D3D. The interactive-diffusion win is about those.${probeDelta}`
     }
     return r
   } catch (e) {
@@ -1165,7 +1166,7 @@ async function runFFN() {
     if (interp) {
       interp.innerHTML = clearWin
         ? `<strong>Fused FFN wins ${r.speedup.toFixed(2)}× at SD-Turbo mid-block shape</strong> ${shapeStr}. 4 dispatches → 2, with GELU and residual-add baked into matmul epilogues. Intermediate re-read skipped: ${savedMB} MB. ${corrStr}.`
-        : `<strong>Fused ≈ naive at SD-Turbo mid-block shape (${r.speedup.toFixed(2)}×)</strong> ${shapeStr}. Correctness: ${corrStr}. Matmul dominates runtime (~${r.tflopsFused.toFixed(2)} TFLOPS, compute-bound on this Apple adapter) — the ${savedMB} MB of intermediate re-reads we skip gets swallowed by unified memory. The win shows up on discrete GPUs (Vulkan/D3D launch overhead, lower BW-to-compute ratio) and compounds when we add attention on top (QKV + softmax + out-proj + LN + FFN → 10+ dispatches collapsed to 3–4). That's v1.1.`
+        : `<strong>Fused ≈ naive at SD-Turbo mid-block shape (${r.speedup.toFixed(2)}×)</strong> ${shapeStr}. Correctness: ${corrStr}. Matmul dominates runtime (~${r.tflopsFused.toFixed(2)} TFLOPS, compute-bound on this Apple adapter) — the ${savedMB} MB of intermediate re-reads we skip gets swallowed by unified memory. The win shows up on discrete GPUs (Vulkan/D3D launch overhead, lower BW-to-compute ratio) and compounds when the full transformer block fuses on top (14 → 9 dispatches — see v1.2 below).`
     }
     setStatus(
       `FFN block · naive ${r.naive.toFixed(1)}ms · fused ${r.fused.toFixed(1)}ms · ${r.speedup.toFixed(2)}× · ${r.tflopsFused.toFixed(2)} TFLOPS`,
@@ -1329,7 +1330,7 @@ async function runTEmbed() {
     if (interp) {
       interp.innerHTML = clearWin
         ? `<strong>Fused timestep embed wins ${r.speedup.toFixed(2)}×</strong> [emb=${r.dims.EMB_DIM} · hid=${r.dims.HID_DIM}]. 3 dispatches → 1 — sinusoidal + Linear_1 + SiLU + Linear_2 all in one workgroup with intermediates in shared memory. Fires once per denoise step.`
-        : `<strong>Fused timestep embed ≈ naive (${r.speedup.toFixed(2)}×)</strong>. 3 → 1 dispatches, correctness ${r.correctness.maxAbsDiff.toExponential(1)} max abs diff. Tiny op; wall time dominated by launch overhead — which is exactly what fusion collapses. On M2 the op is <0.1ms either way so the relative speedup is noisy. On discrete GPUs 3 → 1 launches = ~30-60µs saved per denoise step.`
+        : `<strong>Fused timestep embed ${r.speedup < 0.95 ? `loses (${r.speedup.toFixed(2)}×)` : `≈ naive (${r.speedup.toFixed(2)}×)`} on this device</strong> (${r.naive.toFixed(2)} → ${r.fused.toFixed(2)} ms). 3 → 1 dispatches, correctness ${r.correctness.maxAbsDiff.toExponential(1)} max abs diff. Tiny op: the fused path runs in a single workgroup, serializing work the naive matmuls spread across the GPU — on low-launch-cost Apple Metal that can lose outright. On discrete GPUs 3 → 1 launches = ~30-60µs saved per denoise step.`
     }
     setStatus(`tembed · naive ${r.naive.toFixed(3)}ms · fused ${r.fused.toFixed(3)}ms · ${r.speedup.toFixed(2)}×`, false)
     return r

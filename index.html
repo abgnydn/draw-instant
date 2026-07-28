@@ -320,7 +320,7 @@
       <p class="mono" style="color: var(--muted); font-size: 11px; margin: -20px 0 8px; letter-spacing: 0.04em;">
         Probe: element-wise chain (mul·add → relu → sub → tanh → mul → sigmoid) over 1M floats.
         Fused = 1 dispatch, chain lives in registers. Naive = 6 dispatches, intermediates in global memory.
-        Both paths are diffed against each other at boot (max abs Δ in the status line); the delta is pure dispatch + memory-traffic overhead.
+        Both paths are diffed against each other at boot (max abs Δ reported below); the timing delta is pure dispatch + memory-traffic overhead.
       </p>
       <p id="probe-interp" style="color: var(--muted); font-size: 13px; margin: 0 0 32px; max-width: 720px;">
         Waiting for probe…
@@ -538,7 +538,7 @@
         <div class="metric"><div class="metric-lbl">parse · s</div><div class="metric-val">—</div></div>
       </div>
       <p class="mono" style="color: var(--muted); font-size: 11px; margin: -20px 0 8px; letter-spacing: 0.04em;">
-        End-to-end test of the hand-rolled ONNX protobuf parser against the real 1.73 GB SD-Turbo U-Net. Opt-in because it's a one-off 1.73 GB download (HTTP-cached after first run). Proves <code>onnx-parser.js</code> reads every TensorProto from the schmuell bundle without any protobuf library.
+        End-to-end test of the hand-rolled ONNX protobuf parser against the real 1.73 GB SD-Turbo U-Net. Opt-in because it's a 1.73 GB download each run (this diagnostic path is deliberately not cached). Proves <code>onnx-parser.js</code> reads every TensorProto from the schmuell bundle without any protobuf library.
       </p>
       <div style="margin: 0 0 8px;">
         <button id="sniff-btn" class="mono" style="background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 8px 14px; font-size: 12px; cursor: pointer; border-radius: 4px;">Sniff UNet schema (1.73 GB one-time)</button>
@@ -561,11 +561,11 @@
         <div class="pipe-diagram">
           <span class="pipe-step">text → tokens</span>
           <span class="arrow">→</span>
-          <span class="pipe-step">CLIP embed (1 dispatch)</span>
+          <span class="pipe-step">CLIP embed (cached per prompt)</span>
           <span class="arrow">→</span>
           <span class="pipe-step hot">fused U-Net step × N</span>
           <span class="arrow">→</span>
-          <span class="pipe-step">VAE decode (1 dispatch)</span>
+          <span class="pipe-step">VAE decode (once per image)</span>
           <span class="arrow">→</span>
           <span class="pipe-step">canvas</span>
         </div>
@@ -580,24 +580,26 @@
       <section class="explainer" id="roadmap">
         <h2>Roadmap</h2>
         <p>
-          <strong>v0 — baseline (today).</strong>
-          Load SD Turbo / SDXL Turbo via ONNX Runtime Web with WebGPU backend. Measure real
-          ms/step on this device. Establishes the number we have to beat.
+          <strong>Shipped — fused kernels (v1.2).</strong>
+          Hand-fused WGSL attention, FFN, and full transformer block at SD-Turbo shapes,
+          benchmarked live above: 14 → 9 dispatches per block, correctness gated against the
+          naive path. Plus fused GroupNorm, Conv, ResNet, cross-attention, and timestep embed
+          as building blocks for our own U-Net.
         </p>
         <p>
-          <strong>v1 — per-layer fusion.</strong>
-          Replace ORT's U-Net graph execution with our own WGSL dispatch loop. Fuse
-          attention-QKV + softmax + output-projection into one pass; fuse FFN + GELU + residual
-          into another. Target: 2–4× step speedup vs. ORT baseline on same device.
+          <strong>Shipped — the product loop.</strong>
+          ORT Web U-Net + our Euler scheduler generate real images on-device: as-you-type live
+          preview, continuous morph mode, and a camera mirror (img2img). Models persist via the
+          Cache API after the first ~2.5 GB download.
         </p>
         <p>
-          <strong>v2 — fused step.</strong>
-          Collapse each U-Net block into a single dispatch using persistent threads and
-          workgroup-local intermediates. Target: interactive latency (&lt;100&nbsp;ms per
-          preview refresh) on mid-range consumer GPUs.
+          <strong>In progress — our WGSL U-Net (v2.5).</strong>
+          Replace ORT's graph execution with our own dispatch loop over the fused blocks:
+          ONNX parsed byte-level, weights straight into our kernels. Target: interactive
+          latency (&lt;100&nbsp;ms per preview refresh) on mid-range consumer GPUs.
         </p>
         <p>
-          <strong>v3 — shareable.</strong>
+          <strong>Next — shareable.</strong>
           URL-fragment-encoded prompt + seed + model + LoRA. Zero-backend sharing, same pattern
           as the <code>.flora</code> adapter format.
         </p>
