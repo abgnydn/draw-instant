@@ -1,0 +1,40 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>wgsl-ops self-test</title>
+  <style>
+    body { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; margin: 24px; max-width: 1000px; }
+    pre { background: #f5f5f5; padding: 12px; border-radius: 6px; overflow: auto; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>wgsl-ops numerical self-tests</h1>
+  <p>Runs every kernel in wgsl-ops.js against CPU references on page load.</p>
+  <pre id="log">running…</pre>
+
+  <script type="module">
+    const log = document.getElementById('log')
+    const println = (s) => {
+      log.textContent += s + '\n'
+      console.log(s)
+    }
+    log.textContent = ''
+    try {
+      if (!navigator.gpu) throw new Error('WebGPU not available in this browser')
+      const adapter = await navigator.gpu.requestAdapter()
+      if (!adapter) throw new Error('no WebGPU adapter')
+      const device = await adapter.requestDevice()
+      device.addEventListener('uncapturederror', (e) => println(`GPU ERR: ${e.error.message}`))
+      // Versioned import busts the module cache on reload (same trick as the
+      // other test pages).
+      const { runOpsTests } = await import('./wgsl-ops-test.js?v=' + Date.now())
+      const r = await runOpsTests(device, println)
+      console.log(r.results)
+    } catch (e) {
+      println('ERR ' + e.message)
+      console.error(e)
+    }
+  </script>
+</body>
+</html>

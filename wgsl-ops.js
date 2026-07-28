@@ -123,7 +123,9 @@ export function unary(device, op) {
 
 // ----- elementwise binary: y = a OP b -----
 //
-// Supports broadcasting via strides (pass null strides for identical shapes).
+// Identical shapes only: indexing wraps at buffer capacity (i % arrayLength),
+// which is only correct when each operand exactly fills its buffer. Use
+// binaryBcast for real broadcasting.
 
 const BINARY_EXPRS = {
   Add: 'a + b', Sub: 'a - b', Mul: 'a * b', Div: 'a / b',
@@ -308,6 +310,10 @@ const WGSL_INSTANCENORM = `
 @group(0) @binding(2) var<storage, read>       beta  : array<f32>;
 @group(0) @binding(3) var<storage, read_write> Y : array<f32>;
 @group(0) @binding(4) var<uniform>             cfg : vec4<u32>; // [C, HW, N, _]
+// Hardcoded eps — the ONNX epsilon attr is NOT plumbed through (cfg has a
+// spare word if ever needed). SD GroupNorms (eps 1e-6) normally hit the fused
+// groupNorm kernel, which reads eps from its uniform; this fallback assumes
+// epsilon = 1e-5 and deviates for anything else.
 const EPS : f32 = 1e-5;
 const WG : u32 = 256u;
 var<workgroup> sSum : array<f32, 256>;
@@ -465,12 +471,14 @@ export function groupNorm(device) {
 // ----- MatMul: Y[M, N] = A[M, K] · B[K, N] -----
 //
 // Tiled shared-memory matmul, 16×16 tiles. Proven design from bench.js.
+// Batched via wg.z: dispatch z=batch; cfg.w=1 means B is batched too
+// (offset bz*K*N), else B is shared across batches.
 
 const WGSL_MATMUL = `
 @group(0) @binding(0) var<storage, read>       A : array<f32>;
 @group(0) @binding(1) var<storage, read>       B : array<f32>;
 @group(0) @binding(2) var<storage, read_write> Y : array<f32>;
-@group(0) @binding(3) var<uniform>             cfg : vec4<u32>; // [M, N, K, _]
+@group(0) @binding(3) var<uniform>             cfg : vec4<u32>; // [M, N, K, bBatched]
 var<workgroup> tileA : array<f32, 256>; // 16*16
 var<workgroup> tileB : array<f32, 256>;
 @compute @workgroup_size(16, 16)
@@ -479,6 +487,10 @@ fn main(
   @builtin(local_invocation_id)  lid : vec3<u32>,
 ) {
   let M = cfg.x; let N = cfg.y; let K = cfg.z;
+  let bz = wg.z;
+  let aBase = bz * M * K;
+  let bBase = select(0u, bz * K * N, cfg.w == 1u);
+  let yBase = bz * M * N;
   let row = wg.y * 16u + lid.y;
   let col = wg.x * 16u + lid.x;
   var acc : f32 = 0.0;
@@ -486,30 +498,30 @@ fn main(
   for (var t : u32 = 0u; t < tiles; t = t + 1u) {
     let kA = t * 16u + lid.x;
     let kB = t * 16u + lid.y;
-    tileA[lid.y * 16u + lid.x] = select(0.0, A[row * K + kA], row < M && kA < K);
-    tileB[lid.y * 16u + lid.x] = select(0.0, B[kB * N + col], kB < K && col < N);
+    tileA[lid.y * 16u + lid.x] = select(0.0, A[aBase + row * K + kA], row < M && kA < K);
+    tileB[lid.y * 16u + lid.x] = select(0.0, B[bBase + kB * N + col], kB < K && col < N);
     workgroupBarrier();
     for (var k : u32 = 0u; k < 16u; k = k + 1u) {
       acc = acc + tileA[lid.y * 16u + k] * tileB[k * 16u + lid.x];
     }
     workgroupBarrier();
   }
-  if (row < M && col < N) { Y[row * N + col] = acc; }
+  if (row < M && col < N) { Y[yBase + row * N + col] = acc; }
 }`
 
 export function matmul(device) {
   const pipeline = getOrCreatePipeline(device, 'matmul', WGSL_MATMUL)
-  return (encoder, A, B, Y, cfgBuf, M, N) => {
+  return (encoder, A, B, Y, cfgBuf, M, N, batch = 1) => {
     const bg = makeBindGroup(device, pipeline, [A, B, Y, cfgBuf])
     const pass = encoder.beginComputePass()
     pass.setPipeline(pipeline)
     pass.setBindGroup(0, bg)
-    pass.dispatchWorkgroups(Math.ceil(N / 16), Math.ceil(M / 16))
+    pass.dispatchWorkgroups(Math.ceil(N / 16), Math.ceil(M / 16), batch)
     pass.end()
   }
 }
 
-// ----- Conv2d as implicit-im2col tiled matmul (stride 1, same pad) -----
+// ----- Conv2d as implicit-im2col tiled matmul -----
 //
 // Y[oc, oy*W+ox] = bias[oc] + Σ_{ic, ky, kx} Wt[oc, ic*K*K + ky*K + kx]
 //                            · X[ic, oy+ky-PAD, ox+kx-PAD]
@@ -520,7 +532,8 @@ export function matmul(device) {
 // fly. This gives the 16× arithmetic-intensity improvement of im2col-matmul
 // without materializing the (potentially multi-GB) im2col matrix.
 //
-// Limits: stride 1, same padding, square kernel K×K.
+// Limits: square kernel K×K, symmetric pad, square stride (cfg.S — the
+// UNet/VAE stride-2 downsample convs go through here too).
 const WGSL_CONV_MM = `
 struct ConvMmCfg {
   C_in:  u32,
@@ -673,6 +686,8 @@ const WGSL_LAYERNORM = `
 @group(0) @binding(2) var<storage, read>       beta  : array<f32>;
 @group(0) @binding(3) var<storage, read_write> Y : array<f32>;
 @group(0) @binding(4) var<uniform>             cfg : vec2<u32>; // [innerLen, rows]
+// Hardcoded eps: matches torch LayerNorm's default 1e-5; graph epsilon is not
+// plumbed through.
 const EPS : f32 = 1e-5;
 @compute @workgroup_size(${WORKGROUP_1D})
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
@@ -708,11 +723,11 @@ export function layerNorm(device) {
   }
 }
 
-// ----- Gemm: Y = alpha·A·B + beta·C (with optional transpose-B) -----
+// ----- Gemm: Y = A·B + C (with optional transpose-B) -----
 //
-// Wraps the matmul kernel with a post-scale + bias-add epilogue. ONNX
-// Gemm is just matmul + bias; we implement as two dispatches (matmul into
-// Y, then binary Add) to avoid pipeline explosion. alpha/beta typically 1.
+// Single fused dispatch: matmul with the bias add in the epilogue
+// (Y = acc + C[col]). alpha/beta/transA are ignored — assumed 1/1/0,
+// which holds for the SD-Turbo exports (only transB varies).
 
 const WGSL_GEMM = `
 @group(0) @binding(0) var<storage, read>       A : array<f32>;
@@ -765,10 +780,10 @@ export function gemm(device) {
   }
 }
 
-// ----- Resize: nearest + bilinear upsample (2D) -----
+// ----- Resize: nearest-neighbor upsample (2D) -----
 //
-// ONNX Resize has many modes; SD uses nearest-neighbor 2x upsample and
-// bilinear/cubic. We support nearest (UNet/VAE) and bilinear (backup).
+// ONNX Resize has many modes; SD's UNet/VAE only need nearest 2x. Nearest
+// only — bilinear/cubic unimplemented (the executor throws for them).
 // Input  [C, H_in, W_in], output [C, H_out, W_out].
 
 // Flat 1D dispatch version: one thread per output element. Uses num_workgroups
@@ -841,8 +856,8 @@ export function reduceMean(device) {
 // ----- Transpose (up to 4D) -----
 //
 // Generic ND transpose via permuted-index copy. For >4D, call in multiple steps.
-// cfg layout (u32[16]): [rank, pad, pad, pad,
-//                        outDim0..3, inStride0..3, perm0..3]
+// cfg layout (u32[20], 80 B): [rank, pad×3,
+//                              outDim0..3, inStride0..3, perm0..3, numel, pad×3]
 // We iterate output linear index, decompose to ND output coords, apply perm
 // to get input coords, dot with inStride, read.
 
@@ -916,11 +931,15 @@ fn main(
   if (i >= arrayLength(&Y)) { return; }
   let x = X[i];
   let e = cfg.x;
-  // Safe pow: if x<0 and e is non-integer, pow is undefined → return 0.
+  // Safe pow: x<0 with non-integer e is undefined → 0. Integer e is sign-aware
+  // (matches BINARY_EXPRS.Pow): pow(|x|, e), negated when e is odd.
   let ei = floor(e);
   let isInt = abs(e - ei) < 1e-6;
   if (x < 0.0 && !isInt) { Y[i] = 0.0; }
-  else { Y[i] = pow(max(x, 0.0), e); }
+  else {
+    let s = select(1.0, -1.0, x < 0.0 && (i32(ei) & 1) == 1);
+    Y[i] = s * pow(abs(x), e);
+  }
 }`
 
 export function powScalar(device) {
@@ -936,9 +955,9 @@ export function powScalar(device) {
 
 // ----- Slice (generic up to 4D, contiguous output, strided input read) -----
 //
-// cfg layout (u32[16]):
-//   [rank, pad, pad, pad,
-//    outDim0..3, inStride0..3, start0..3]
+// cfg layout (u32[20], 80 B):
+//   [rank, pad×3,
+//    outDim0..3, inStride0..3, start0..3, numel, pad×3]
 // Y is packed row-major over outDim; X is read at offset Σ (start[d] + outIdx[d]*step[d]) * inStride[d].
 // For now, assume step=1 (no strided slicing — common case for SD-Turbo).
 const WGSL_SLICE = `

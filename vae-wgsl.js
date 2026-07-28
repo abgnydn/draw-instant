@@ -9,13 +9,13 @@
 // vaeDecodeDiag) runs one forward pass with per-node logging so we can find
 // the first broken op in one shot.
 
-import { fetchAndParseONNXGraph } from './onnx-parser.js'
-import { WeightCache, f16BytesToF32 } from './wgsl-unet.js'
 // Versioned dynamic imports: when the test harness loads vae-wgsl.js?v=N,
-// we use N to bust the executor/ops cache too. Otherwise static imports
-// resolve to the unversioned URL and stay cached across reloads.
+// we use N to bust the parser/weight-cache/executor/ops cache too. Otherwise
+// static imports resolve to the unversioned URL and stay cached across reloads.
 const _mv = new URL(import.meta.url).searchParams.get('v') || ''
 const _vq = _mv ? `?v=${_mv}` : ''
+const { fetchAndParseONNXGraph } = await import(`./onnx-parser.js${_vq}`)
+const { WeightCache, f16BytesToF32 } = await import(`./wgsl-unet.js${_vq}`)
 const { Executor, Tensor } = await import(`./wgsl-executor.js${_vq}`)
 const { createStorage } = await import(`./wgsl-ops.js${_vq}`)
 
@@ -37,6 +37,7 @@ export async function loadVAEWGSL(onProgress = () => {}) {
 
   if (!navigator.gpu) throw new Error('WebGPU not available')
   const adapter = await navigator.gpu.requestAdapter()
+  if (!adapter) throw new Error('no adapter')
   // VAE decoder's largest tensor [1,256,512,512] f32 = 256 MB, exceeds the
   // default maxStorageBufferBindingSize (128 MB). Request adapter's max so
   // bindings don't silently fail (kernel dispatches become no-ops → zeros).
@@ -128,8 +129,9 @@ export async function vaeDecodeWGSL(latent, { B = 1, lH = 64, lW = 64 } = {}) {
   const image = new Float32Array(readBuf.getMappedRange().slice())
   readBuf.unmap()
   readBuf.destroy()
-  // Return the graph-output buf to the executor's pool now that readback done.
-  executor.pool.release(outT.buf, outT.byteLength || numel * 4)
+  // The graph output is a fresh snapshot buffer (not pool-owned) — destroy it
+  // now that readback is done.
+  outT.buf.destroy()
   // Same for the latent input buf we created fresh for this call.
   if (inTensor.buf && inTensor.buf !== outT.buf) inTensor.buf.destroy?.()
   return { image, dims: outT.dims, decodeMs }

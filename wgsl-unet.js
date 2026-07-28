@@ -1,10 +1,10 @@
 // draw.instant — v2.5.5/v2.5.6 ONNX weight plumbing
 //
 // Exposes:
-//   • parseONNXWeights / fetchAndParseONNX — hand-rolled protobuf parser
 //   • WeightCache — lazy GPU buffer upload keyed by ONNX tensor name
 //   • f16BytesToF32 — IEEE-754 half→single converter
 //   • sniffUNetSchema — opt-in audit that fetches the real 1.73 GB bundle
+//   • loadUNetWeights / scopeOps — console-only probes (no in-repo callers)
 //
 // The WGSL forward pass that used to live here was untested code; it's out
 // until there's a verification loop. Sniff + parser + cache stand alone and
@@ -14,7 +14,7 @@
 // gets the same cache-busting query so fixes deploy without browser restart.
 const _unetMv = new URL(import.meta.url).searchParams.get('v') || ''
 const _unetVq = _unetMv ? `?v=${_unetMv}` : ''
-const { parseONNXWeights, fetchAndParseONNX, fetchAndParseONNXGraph } = await import(`./onnx-parser.js${_unetVq}`)
+const { fetchAndParseONNX, fetchAndParseONNXGraph } = await import(`./onnx-parser.js${_unetVq}`)
 
 const SCHMUELL_BASE = 'https://huggingface.co/schmuell/sd-turbo-ort-web/resolve/main'
 const SCHMUELL_UNET_URL = `${SCHMUELL_BASE}/unet/model.onnx`

@@ -4,7 +4,7 @@
 // hand-rolled parser, upload weights into a WeightCache, run through the WGSL
 // Executor. Unlike the VAE (one input), UNet has 3:
 //   sample                 [B, 4, H, W]  f32
-//   timestep               [B]           f32 (SD-Turbo's ORT export uses f32 scalar)
+//   timestep               [B]           int64 (matches the ONNX graph; see unet.js ORT path)
 //   encoder_hidden_states  [B, 77, 1024] f32 (OpenCLIP text conditioning)
 // and one output: out_sample [B, 4, H, W].
 //
@@ -23,7 +23,8 @@ const { createStorage } = await import(`./wgsl-ops.js${_vq}`)
 
 const SCHMUELL_BASE = 'https://huggingface.co/schmuell/sd-turbo-ort-web/resolve/main'
 // Prefer locally-served copy if present (avoids HF 403 / 1.65 GB re-download).
-// The test harness symlinks /tmp/unet.onnx → draw-instant/unet.onnx.
+// Place the model at draw-instant/unet.onnx (gitignored, not in the repo) to
+// use it; otherwise the fetch 404s and we fall back to HF.
 const UNET_URL = './unet.onnx'
 const UNET_URL_FALLBACK = `${SCHMUELL_BASE}/unet/model.onnx`
 
@@ -51,6 +52,7 @@ export async function loadUNetWGSL(onProgress = () => {}) {
 
   if (!navigator.gpu) throw new Error('WebGPU not available')
   const adapter = await navigator.gpu.requestAdapter()
+  if (!adapter) throw new Error('no adapter')
   const lim = adapter.limits
   const device = await adapter.requestDevice({
     requiredLimits: {
@@ -154,7 +156,7 @@ export async function unetForwardWGSL(sample, timestep, cond, { B = 1, H = 64, W
   readBuf.unmap()
   readBuf.destroy()
 
-  executor.pool.release(outT.buf, outT.byteLength || numel * 4)
+  outT.buf.destroy()  // graph output is a fresh snapshot buffer, not pool-owned
   for (const b of [sBuf, cBuf]) if (b !== outT.buf) b.destroy?.()
   return { out, dims: outT.dims, ms }
 }
@@ -305,5 +307,9 @@ export async function unetCheckpointWGSL(sample, timestep, cond, {
       }
     }
   }
+  // Final flush — break paths above can exit mid-cycle with up to K-1 nodes of
+  // recorded work still unsubmitted (mirrors vae-wgsl.js).
+  try { device.queue.submit([encoder.finish()]) } catch {}
+  await device.queue.onSubmittedWorkDone()
   return { report, lastGpuNode }
 }

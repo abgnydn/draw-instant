@@ -1,9 +1,10 @@
 // draw.instant — v2.5.5 minimal ONNX protobuf parser
 //
 // Walks an ONNX file byte-by-byte to extract the GraphProto initializers (the
-// model's weight tensors) as a dict { name → { dims, dtype, data } }. Ignores
-// everything else (node graph, opset info, metadata) because for v2.5.6 we
-// only need weights — the topology is hand-coded in WGSL.
+// model's weight tensors) as a dict { name → { dims, dtype, data } }, plus the
+// node graph and value-info via parseONNXGraph (nodes / inputs / outputs /
+// opHist) — the WGSL executor builds its topology from those nodes. Opset
+// info and metadata are still ignored.
 //
 // Protobuf wire format reminder:
 //   Each field = (tag << 3 | wire_type) followed by value.
@@ -124,11 +125,10 @@ export function parseTensor(bytes, start, end) {
     } else if (field === 4 && wire === 2) {
       // float_data: repeated f32, packed. Alignment-safe: copy bytes first,
       // then view as Float32Array from a fresh (aligned) buffer.
-      const { end: e2 } = r.lenDelimited()
-      const byteLen = e2 - r.p
-      const copy = bytes.slice(r.p, e2)
+      const { start: s2, end: e2 } = r.lenDelimited()
+      const byteLen = e2 - s2
+      const copy = bytes.slice(s2, e2)
       float_data = new Float32Array(copy.buffer, copy.byteOffset, byteLen / 4)
-      r.p = e2
     } else if (field === 4 && wire === 5) {
       // float_data unpacked: single f32 value per entry.
       const dv = new DataView(bytes.buffer, bytes.byteOffset + r.p, 4)
@@ -188,10 +188,9 @@ function parseAttribute(bytes, start, end) {
         const { start: s2, end: e2 } = r.lenDelimited()
         try { a.t = parseTensor(bytes, s2, e2) } catch (_) { /* leave a.t null */ }
       } else if (field === 7 && wire === 2) {
-        const { end: e2 } = r.lenDelimited()
-        const n = (e2 - r.p) / 4
-        a.floats = new Float32Array(bytes.buffer, bytes.byteOffset + r.p, n).slice()
-        r.p = e2
+        const { start: s2, end: e2 } = r.lenDelimited()
+        const copy = bytes.slice(s2, e2)
+        a.floats = new Float32Array(copy.buffer, copy.byteOffset, (e2 - s2) / 4)
       } else if (field === 8) {
         const toSigned = (raw) => {
           const big = typeof raw === 'bigint' ? raw : BigInt(raw)
@@ -281,7 +280,10 @@ function parseValueInfo(bytes, start, end) {
                     let dim = -1
                     while (!dr.eof()) {
                       const { field: f5, wire: w5 } = dr.tag()
-                      if (f5 === 1 && w5 === 0) dim = Number(dr.varint())
+                      if (f5 === 1 && w5 === 0) {
+                        const raw = dr.varint()
+                        dim = Number(raw >= (1n << 63n) ? raw - (1n << 64n) : raw)
+                      }
                       else dr.skip(w5)
                     }
                     vi.dims.push(dim)
@@ -568,7 +570,8 @@ export async function fetchAndParseONNXGraph(url, onProgress = () => {}) {
 // both network and parse phases. Returns the same shape as parseONNXWeights.
 export async function fetchAndParseONNX(url, onProgress = () => {}) {
   onProgress('fetch', 0, 'downloading…')
-  const res = await fetch(url, { cache: 'force-cache' })
+  // cache: default — force-cache pins stale 404s forever (see fetchAndParseONNXGraph).
+  const res = await fetch(url)
   if (!res.ok) throw new Error(`fetch ${url} → ${res.status}`)
   const total = Number(res.headers.get('content-length')) || 0
   const reader = res.body.getReader()
