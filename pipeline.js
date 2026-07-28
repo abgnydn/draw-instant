@@ -16,7 +16,7 @@ import { runCrossAttnBench } from './fused-cross-attn.js'
 import { runTEmbedBench } from './fused-tembed.js'
 import { sniffUNetSchema } from './wgsl-unet.js'
 import { initORT } from './ort.js'
-import { loadSDTurbo, encodePrompt, getTokenizer } from './sd.js'
+import { loadSDTurbo, encodePrompt, getTokenizer, loadTokenizer } from './sd.js'
 import { loadUNet, unetStep } from './unet.js'
 import { loadSDTextEncoder, encodeSDPrompt } from './text-encoder.js'
 import { loadVAE, vaeDecode as vaeDecodeORT, imageToImageData } from './vae.js'
@@ -56,6 +56,9 @@ const ui = {
   mStep: $('m-step'),
   mTotal: $('m-total'),
   mDisp: $('m-disp'),
+  mStepLbl: $('m-step-lbl'),
+  mTotalLbl: $('m-total-lbl'),
+  mDispLbl: $('m-disp-lbl'),
   mBackend: $('m-backend'),
   sdPanel: $('sd-panel'),
   sdProgressBar: $('sd-progress-bar'),
@@ -153,6 +156,15 @@ function bindSliders() {
 function setStatus(msg, live = false) {
   ui.status.textContent = msg
   ui.status.classList.toggle('live', live)
+}
+
+// The top metrics bar is shared between the boot probe (fused/naive/speedup)
+// and the generation modes — relabel it so the numbers always sit under an
+// honest heading.
+function setMetricLabels(a, b, c) {
+  if (ui.mStepLbl) ui.mStepLbl.textContent = a
+  if (ui.mTotalLbl) ui.mTotalLbl.textContent = b
+  if (ui.mDispLbl) ui.mDispLbl.textContent = c
 }
 
 function setSDProgress(msg, frac) {
@@ -462,6 +474,7 @@ async function cachedEncode(prompt) {
 // iteration picks up the new prompt/seed/resolution. Image morphs smoothly.
 let _continuousMode = false
 let _continuousRunning = false
+let _continuousEpoch = 0
 let _continuousPrompt = ''
 let _continuousSeed = 0
 let _continuousSteps = 1
@@ -497,7 +510,7 @@ async function loadAllModels() {
     })
   }
 
-  await loadSDTurbo(() => {})  // Xenova CLIP tokenizer for our text encoder
+  await loadTokenizer()  // Xenova CLIP tokenizer for our text encoder
   _liveTokenizer = getTokenizer()
 
   // ── Breakthrough #3: shader warmup ─────────────────────────────────────────
@@ -657,6 +670,7 @@ async function liveDenoise(prompt, seed, steps) {
   ctx2.fillStyle = 'rgba(255,255,255,0.78)'
   ctx2.fillText(`"${prompt.slice(0, 56)}${prompt.length > 56 ? '…' : ''}"`, 14, 504)
 
+  setMetricLabels('ms/step', 'total · ms', 'steps')
   ui.mStep.textContent  = msPerStep.toFixed(0)
   ui.mTotal.textContent = totalMs.toFixed(0)
   ui.mDisp.textContent  = `${sched.numInference}`
@@ -666,6 +680,7 @@ async function liveDenoise(prompt, seed, steps) {
 
 function scheduleLiveDenoise() {
   if (!_liveReady) return
+  if (_cameraRunning) return  // camera loop reads the prompt itself each frame
   // In continuous mode, just update the targets — the loop picks them up.
   if (_continuousMode) {
     _continuousPrompt = (ui.promptEl.value || '').trim()
@@ -704,16 +719,19 @@ function scheduleLiveDenoise() {
 //   _continuousPrompt/Seed/Steps = user targets, mutable mid-loop
 //   _continuousFrameCount        = incremented every completed frame (for FPS)
 //
-// Cancellation: the boolean flag `_continuousRunning` — set false by the toggle
-// or when the user leaves continuous mode. Epoch counter isn't needed because
-// there's only ever one loop running and it's cooperative.
+// Cancellation: `_continuousRunning` (set false by the toggle) plus an epoch
+// counter — a fast OFF→ON toggle can start a new loop while the old one is
+// still inside an await; the epoch makes the stale loop die at its next
+// checkpoint instead of reviving when the flag flips true again.
 async function continuousLoop() {
+  const myEpoch = ++_continuousEpoch
+  const live = () => _continuousRunning && myEpoch === _continuousEpoch
   _continuousRunning = true
   _continuousFrameCount = 0
   const t0 = performance.now()
   let fpsT0 = t0
   let fpsFrames = 0
-  while (_continuousRunning) {
+  while (live()) {
     const prompt = _continuousPrompt
     const seed   = _continuousSeed
     const steps  = _continuousSteps
@@ -723,7 +741,7 @@ async function continuousLoop() {
     try {
       const tF = performance.now()
       const condResult = await cachedEncode(prompt)
-      if (!_continuousRunning) break
+      if (!live()) break
       const cond = condResult.embedding
 
       // Fresh seeded latent per frame — keeps the "morphing" feel. Seed changes
@@ -734,19 +752,19 @@ async function continuousLoop() {
       const sched = makeEulerScheduler(steps)
       let latent = sampleNoiseLatent(1, lH, lW, evolvingSeed, sched.initNoiseSigma)
       for (let i = 0; i < sched.numInference; i++) {
-        if (!_continuousRunning) break
+        if (!live()) break
         const modelIn = sched.scaleModelInput(latent, i)
         const { pred } = await unetStep({
           latent: modelIn, timestep: sched.timesteps[i], cond,
           B: 1, H: lH, W: lW, condTokens: 77, condDim: 1024,
         })
-        if (!_continuousRunning) break
+        if (!live()) break
         latent = sched.step(latent, pred, i)
       }
-      if (!_continuousRunning) break
+      if (!live()) break
 
       const { image, decodeMs } = await vaeDecode(latent, { B: 1, lH, lW })
-      if (!_continuousRunning) break
+      if (!live()) break
       const pixels = imageToImageData(image, imgH, imgW)
       const off = document.createElement('canvas')
       off.width = imgW; off.height = imgH
@@ -761,6 +779,7 @@ async function continuousLoop() {
       // Update FPS readout every ~500ms.
       if (performance.now() - fpsT0 > 500) {
         const fps = fpsFrames / ((performance.now() - fpsT0) / 1000)
+        setMetricLabels('frame · ms', 'fps', 'mode')
         ui.mStep.textContent = frameMs.toFixed(0)
         ui.mTotal.textContent = fps.toFixed(2)
         ui.mDisp.textContent = 'morph'
@@ -781,14 +800,19 @@ async function continuousLoop() {
       await new Promise((r) => setTimeout(r, 200))
     }
   }
-  _continuousRunning = false
-  setStatus(`continuous stopped · ${_continuousFrameCount} frames in ${((performance.now() - t0) / 1000).toFixed(1)}s`, false)
+  // A superseded loop (newer epoch took over) must not clobber the newer
+  // loop's flag or status — only the current loop reports shutdown.
+  if (myEpoch === _continuousEpoch) {
+    _continuousRunning = false
+    setStatus(`continuous stopped · ${_continuousFrameCount} frames in ${((performance.now() - t0) / 1000).toFixed(1)}s`, false)
+  }
 }
 
 function toggleContinuousMode() {
   _continuousMode = !_continuousMode
   const btn = document.getElementById('continuous-btn')
   if (_continuousMode) {
+    if (_cameraRunning) onToggleCamera()  // camera and morph are mutually exclusive
     if (btn) { btn.textContent = 'Stop morph mode'; btn.classList.add('live') }
     // Kick off immediately if prompt present.
     scheduleLiveDenoise()
@@ -994,6 +1018,7 @@ async function cameraLoop() {
       if (frameCount % 4 === 0) {
         const elapsed = (performance.now() - t0) / 1000
         const fps = frameCount / elapsed
+        setMetricLabels('frame · ms', 'fps', 'mode')
         ui.mStep.textContent = (1000 / fps).toFixed(0)
         ui.mTotal.textContent = fps.toFixed(2)
         ui.mDisp.textContent = 'cam'
@@ -1001,6 +1026,7 @@ async function cameraLoop() {
       }
     } catch (e) {
       console.error('camera frame failed', e)
+      if (_cameraRunning) onToggleCamera()  // reuse stop path: flag, stream, button
       setStatus(`camera frame failed: ${e.message}`, false)
       break
     }
@@ -1025,6 +1051,7 @@ async function onToggleCamera() {
   }
   const camBtn = document.getElementById('camera-btn')
   try {
+    if (_continuousMode) toggleContinuousMode()  // stop morph mode before the camera takes over
     if (camBtn) { camBtn.disabled = true; camBtn.textContent = 'Loading encoder…' }
     await ensureVAEEncoder()
     if (camBtn) { camBtn.textContent = 'Requesting camera…' }
@@ -1081,7 +1108,7 @@ async function runProbe() {
       ? `fused wins ${r.speedup.toFixed(2)}×`
       : `naive wins ${(1 / r.speedup).toFixed(2)}× (low-overhead backend)`
     setStatus(
-      `probe done · 1M element-wise chain · fused ${r.fused.toFixed(2)}ms vs naive ${r.naive.toFixed(2)}ms · ${verdict}`,
+      `probe done · 1M element-wise chain · fused ${r.fused.toFixed(2)}ms vs naive ${r.naive.toFixed(2)}ms · ${verdict} · Δ=${r.correctness.maxAbsDiff.toExponential(1)}`,
       false,
     )
 
@@ -1271,7 +1298,7 @@ async function runCrossAttn() {
     const clearWin = r.speedup > 1.05
     if (interp) {
       interp.innerHTML = clearWin
-        ? `<strong>Fused cross-attention wins ${r.speedup.toFixed(2)}× at SD-Turbo mid-block shape</strong> ${shapeStr}. 3 dispatches → 1 via flash-attention over the S_kv axis (streaming softmax, scores never touch global memory). Correctness: ${r.correctness.maxAbsDiff.toExponential(1)} max abs diff.`
+        ? `<strong>Fused cross-attention wins ${r.speedup.toFixed(2)}× at SD-Turbo mid-block shape</strong> ${shapeStr}. 3 dispatches → 1: S_kv=77 scores stay in workgroup memory and are softmaxed on-chip, never touching global memory. Correctness: ${r.correctness.maxAbsDiff.toExponential(1)} max abs diff.`
         : `<strong>Fused cross-attention ≈ naive at ${shapeStr} (${r.speedup.toFixed(2)}×)</strong>. 3 → 1 dispatches, correctness ${r.correctness.maxAbsDiff.toExponential(1)} max abs diff. S_kv=77 is small so the scores+probs scratch is tiny — Apple unified memory absorbs the save. On discrete GPUs the launch savings compound, and cross-attn fires twice per transformer block × ~16 blocks = 32× per U-Net forward pass.`
     }
     setStatus(`cross-attn · naive ${r.naive.toFixed(2)}ms · fused ${r.fused.toFixed(2)}ms · ${r.speedup.toFixed(2)}×`, false)
@@ -1339,7 +1366,8 @@ async function runSniff() {
       `
     }
     if (interp) {
-      const topGroups = r.groups.slice(0, 8).map(([k, n]) => `<code>${k}</code>:${n}`).join(' · ')
+      const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      const topGroups = r.groups.slice(0, 8).map(([k, n]) => `<code>${esc(k)}</code>:${n}`).join(' · ')
       interp.innerHTML = `<strong>Parser round-trip clean on the real 1.73 GB bundle.</strong> ${r.count} tensors · ${(r.bytes / 1024 / 1024).toFixed(0)} MB. Top prefixes: ${topGroups}. Full group list in console.`
     }
     console.groupCollapsed(`[v2.5.6] UNet tensor groups (${r.groups.length})`)
@@ -1540,8 +1568,8 @@ async function boot() {
   }
 
   // v0.1: run the fusion probe. Real numbers, this device, right now.
+  // A probe failure is not fatal — the benches and live mode are independent.
   const probe = await runProbe()
-  if (!probe) return
 
   // v1: our own hand-fused WGSL FFN block at SD-Turbo mid-block shapes.
   // This is the comparison the product is actually about: our kernel vs a naive
