@@ -42,7 +42,8 @@ npm test             # node: ONNX protobuf parser round-trip
 
 WGSL kernel correctness runs in the browser (Node has no WebGPU):
 
-- `wgsl-ops-test.js` — every kernel vs. a CPU reference, gate `< 1e-4`.
+- `wgsl-ops-test.js` — every kernel vs. a CPU reference, gate `< 1e-4`
+  (open `ops-test.html` to run it).
 - `vae-wgsl-test.html`, `unet-wgsl-test.html` — per-node diagnostic harnesses
   that bisect to the first numerically-wrong op against the ORT reference.
 

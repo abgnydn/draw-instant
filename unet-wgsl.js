@@ -1,6 +1,6 @@
 // draw.instant — WGSL UNet (SD-Turbo) denoiser
 //
-// Mirrors vae-wgsl.js's structure: fetch + parse the 1.65 GB UNet ONNX via our
+// Mirrors vae-wgsl.js's structure: fetch + parse the 1.73 GB UNet ONNX via our
 // hand-rolled parser, upload weights into a WeightCache, run through the WGSL
 // Executor. Unlike the VAE (one input), UNet has 3:
 //   sample                 [B, 4, H, W]  f32
@@ -22,7 +22,7 @@ const { Executor, Tensor } = await import(`./wgsl-executor.js${_vq}`)
 const { createStorage } = await import(`./wgsl-ops.js${_vq}`)
 
 const SCHMUELL_BASE = 'https://huggingface.co/schmuell/sd-turbo-ort-web/resolve/main'
-// Prefer locally-served copy if present (avoids HF 403 / 1.65 GB re-download).
+// Prefer locally-served copy if present (avoids HF 403 / 1.73 GB re-download).
 // Place the model at draw-instant/unet.onnx (gitignored, not in the repo) to
 // use it; otherwise the fetch 404s and we fall back to HF.
 const UNET_URL = './unet.onnx'

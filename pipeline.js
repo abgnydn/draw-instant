@@ -224,7 +224,7 @@ async function onEncodePrompt() {
     drawEmbeddingVis(r.probe, prompt, r)
     // Stage the next action: download SD-Turbo U-Net and run the denoise loop.
     ui.go.textContent = 'Load SD-Turbo U-Net (1.73 GB)'
-    ui.go.title = 'Downloads once, cached via HTTP cache / IndexedDB'
+    ui.go.title = 'Downloads once, cached via the Cache API'
     ui.go.removeEventListener('click', onEncodePrompt)
     ui.go.addEventListener('click', onDenoise)
   } catch (e) {
@@ -1611,7 +1611,7 @@ async function boot() {
   if (!ortInfo) return
 
   // v4: one-click live mode. Button loads all 3 models (text encoder + U-Net +
-  // VAE, ~2.5 GB total, HTTP-cached after first load), then wires the prompt
+  // VAE, ~2.5 GB total, Cache API-cached after first load), then wires the prompt
   // textarea for as-you-type regeneration with cancellation on new keystrokes.
   ui.go.textContent = 'Go live — load ~2.5 GB of models'
   ui.go.disabled = false

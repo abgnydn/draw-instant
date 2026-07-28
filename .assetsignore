@@ -8,6 +8,10 @@
 *.mjs
 *.toml
 *.cff
+*.ipynb
+# Never upload local dev model weights (a ./unet.onnx copy is a legit dev
+# fast-path but is 1.73 GB — it must not ride along on `wrangler deploy`).
+*.onnx
 package.json
 LICENSE
 .gitignore

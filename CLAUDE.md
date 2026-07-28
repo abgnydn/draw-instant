@@ -16,12 +16,15 @@ a handful. See `README.md` for the pitch, `ARCHITECTURE.md` for the design,
 npm start        # python3 -m http.server 8787  → open http://localhost:8787
 npm test         # node onnx-parser-test.mjs (the only headless test; no WebGPU)
 npm run scope    # node scope-nodes.mjs <model.onnx> — op histogram for a model
+npm run deploy   # npx wrangler deploy — Cloudflare Workers static assets (DEPLOY.md)
 ```
 
 There is **no build step and no install** — hand-authored ES modules loaded
 directly by the browser; ORT Web + Transformers.js load from a CDN at runtime.
-WGSL kernel tests (`wgsl-ops-test.js`, `*-test.html`) need a real GPU and run in
-the browser, not in CI.
+WGSL kernel tests (`wgsl-ops-test.js`, run via `ops-test.html`) and the
+`*-test.html` model harnesses need a real GPU and run in the browser, not in
+CI. Headless discrete-GPU numbers: `bench-headless.mjs` (Deno native WebGPU) /
+`modal_bench.py` — see `BENCH.md`.
 
 ## Layout (two paths)
 
@@ -36,8 +39,9 @@ the browser, not in CI.
 
 ## Invariants — keep these true
 
-- **Never commit model weights.** `*.onnx` is git-ignored; SD-Turbo weights
-  fetch from Hugging Face and cache in IndexedDB. The 1.65 GB U-Net is why.
+- **Never commit model weights.** `*.onnx` is git-ignored (and `.assetsignore`d);
+  SD-Turbo weights fetch from Hugging Face and persist via the Cache API
+  (`draw-instant-models`). The 1.73 GB U-Net is why.
 - **Correctness gates speed.** New WGSL ops land with a CPU-reference test in
   `wgsl-ops-test.js` (gate `< 1e-4`). A faster-but-wrong kernel is a regression.
 - **Honest numbers.** Publish what was measured, including washes/losses. Don't

@@ -34,11 +34,11 @@ U-Net denoiser, computed on your own GPU, in the tab. No server, no upload.**
 
 - **Not a finished product.** The fused self-hosted U-Net is mid-wiring (see
   [Status](#status) and [LIMITATIONS.md](./LIMITATIONS.md)). The ORT reference
-  path generates real latents today; the all-our-kernels path runs the VAE and
-  is being extended to the U-Net.
+  path generates real images today — including live, morph, and camera modes;
+  the all-our-kernels path runs the VAE and is being extended to the U-Net.
 - **Not faster than ORT on Apple Silicon.** On unified memory the fused path
-  *ties* the naive path — and we publish that, in full, below. The win is on
-  discrete GPUs, where launch overhead dominates.
+  *ties* the naive path on the compute-bound blocks — and we publish that, in
+  full, below. The win is on discrete GPUs, where launch overhead dominates.
 - **Not a general ONNX runtime.** The parser and executor cover exactly the
   SD-Turbo op set, on purpose. Unsupported ops surface explicitly rather than
   silently mis-execute.
@@ -66,7 +66,7 @@ The page opens with a generate panel and a column of live benchmark cards.
 
 | Panel | What it shows |
 |---|---|
-| **Generate** | prompt · steps (1–8) · seed · guidance · resolution → 512×512 canvas, with a per-step / total / dispatch metric bar |
+| **Generate** | prompt · steps (1–8) · seed · guidance · resolution → 512×512 canvas; one click loads the models, then as-you-type live mode, a continuous morph loop, and a camera mirror (img2img). The shared metric bar relabels itself per mode |
 | **Fusion benchmark cards** | elementwise probe, FFN, attention, full transformer block, GroupNorm, Conv2d, ResNet, cross-attention, timestep-embed — each runs naive-vs-fused live and prints ms + max-abs-diff for *your* GPU |
 | **Schema sniff** | one-time fetch that confirms the real SD-Turbo U-Net input/output signature |
 
@@ -83,12 +83,15 @@ diff, measured live in your browser. No cherry-picking. On **Apple M2**:
 
 | Block | Naive | Fused | Result | Correctness |
 |---|---:|---:|:--:|---|
+| Elementwise probe (`bench.js`) | 0.60 ms | 0.30 ms | 🟢 2.0× | readback-verified at boot |
 | FFN (`fused-block.js`) | 66.7 ms | 66.1 ms | 🔴 1.01× (wash) | 0 max abs diff |
 | Full transformer block (`fused-block-full.js`) | 28.6 ms | 28.3 ms | 🔴 1.01× (wash) | 8.0e-7 max abs diff |
 
-🔴 **Apple Silicon is a wash, and that's expected.** Unified memory makes the
-global-memory round-trips that fusion eliminates nearly free — there's little
-launch/bandwidth overhead left to remove.
+🔴 **The compute-bound blocks are a wash on Apple Silicon, and that's
+expected.** Unified memory makes the global-memory round-trips that fusion
+eliminates nearly free — there's little launch/bandwidth overhead left to
+remove. The tiny elementwise probe is the exception: at sub-millisecond scale
+it's launch-bound even on M2, and collapsing 6 dispatches to 1 shows ~2×.
 
 🟢 **Discrete GPUs are the target.** Kernel-launch overhead dominates there, and
 the same fusion work this repo descends from delivered **159–720× over PyTorch**
@@ -108,7 +111,7 @@ Speed only counts behind a correctness gate. Three layers:
 | Layer | Check | Gate | Runs in |
 |---|---|---|---|
 | **Unit** | ONNX protobuf parser round-trip (`onnx-parser-test.mjs`) | exact | Node / CI |
-| **Kernel** | every WGSL op vs. a CPU reference (`wgsl-ops-test.js`) | `< 1e-4` max abs diff | browser |
+| **Kernel** | every WGSL op vs. a CPU reference (`wgsl-ops-test.js`, run via `ops-test.html`) | `< 1e-4` max abs diff | browser |
 | **Model** | full forward pass, per-node bisect vs. the ORT reference (`*-test.html`) | first-divergent-op | browser |
 
 The end-to-end target is a pixel diff against the reference ORT + schmuell path
@@ -181,9 +184,13 @@ See [Models](#models) for the one-time weight download.
 |---|---|---|
 | `bench.js` | elementwise chain (1M floats) | 6 → 1 |
 | `fused-block.js` | FFN (GELU + residual in epilogues) | 4 → 2 |
-| `fused-attn.js` | attention (online softmax in registers) | 5 → 1 |
+| `fused-attn.js` | attention op (scores softmaxed on-chip, no global scratch) | 3 → 1 |
 | `fused-block-full.js` | full transformer block | 14 → 9 |
-| `fused-groupnorm.js` · `fused-conv.js` · `fused-resnet.js` · `fused-cross-attn.js` · `fused-tembed.js` | rest of the U-Net blocks | n → 1 |
+| `fused-groupnorm.js` | GroupNorm | 2 → 1 |
+| `fused-conv.js` | Conv2d + SiLU + residual | 3 → 1 |
+| `fused-resnet.js` | ResNet block | 9 → 4 |
+| `fused-cross-attn.js` | cross-attention (full softmax over S_kv=77 on-chip) | 3 → 1 |
+| `fused-tembed.js` | timestep embedding | 3 → 1 |
 
 </details>
 
@@ -203,7 +210,7 @@ verification strategy — read **[ARCHITECTURE.md](./ARCHITECTURE.md)**.
 | Custom WGSL engine (parser + ops + executor, runs the VAE) | ✅ |
 | Self-hosted WGSL U-Net denoise loop | 🚧 |
 | First end-to-end image under our own U-Net kernels | ⏳ |
-| As-you-type live preview · live camera mirror | ⏳ |
+| As-you-type live preview · morph loop · live camera mirror (ORT U-Net) | ✅ |
 
 Full v0→v5 trajectory: [ROADMAP.md](./ROADMAP.md). Version history:
 [CHANGELOG.md](./CHANGELOG.md).
@@ -213,14 +220,18 @@ Full v0→v5 trajectory: [ROADMAP.md](./ROADMAP.md). Version history:
 ## Models
 
 Weights come from [`schmuell/sd-turbo-ort-web`](https://huggingface.co/schmuell/sd-turbo-ort-web),
-**fetched on demand and cached in IndexedDB** — the multi-GB download happens
-once per browser, and weights are **never committed** (`*.onnx` is ignored).
+**fetched on demand and persisted via the Cache API** (`draw-instant-models`) —
+the multi-GB download happens once per browser, and weights are **never
+committed** (`*.onnx` is ignored). Hugging Face's no-store redirects defeat the
+plain HTTP cache, which is why the bytes are stored explicitly; only the
+transformers.js tokenizer path uses IndexedDB.
 
 | Component | Size |
 |---|---|
 | `text_encoder/model.onnx` | ~650 MB |
-| `unet/model.onnx` | ~1.65 GB |
+| `unet/model.onnx` | ~1.73 GB |
 | `vae_decoder/model.onnx` | ~99 MB |
+| `vae_encoder/model.onnx` (camera mode) | ~68 MB |
 
 **Optional local copy (WGSL U-Net path).** The WGSL loader requests
 `./unet.onnx` first and falls back to Hugging Face. To skip the re-download in
@@ -269,7 +280,7 @@ The non-negotiables (full text in [CONTRIBUTING.md](./CONTRIBUTING.md)):
 | Bar to beat | **~1 s** | best browser SDXL-Turbo on an RTX 4090 (ORT) |
 | U-Net dispatches today | **60+ / step** | ORT Web — the overhead we're collapsing |
 | Fused full block | **14 → 9 dispatches** | what the math allows at equal kernel quality |
-| Fused attention | **5 → 1 dispatch** | flash-style, online softmax in registers |
+| Fused attention | **3 → 1 dispatch** | flash-style single dispatch, softmax on-chip |
 | Fleet precedent | **159–720×** | the fusion work this repo descends from, over PyTorch |
 | SD-Turbo steps | **1–4** | Euler Discrete schedule |
 | Latent / image | **[1,4,64,64] / [1,3,512,512]** | VAE scaling factor 0.18215 |

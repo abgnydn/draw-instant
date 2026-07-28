@@ -1,8 +1,9 @@
 # Headless benchmarks — getting real discrete-GPU numbers
 
-The roadmap's open question is whether kernel fusion actually wins: every number
-we have is ~1.0× on an Apple M2 (compute-bound, unified memory). The thesis —
-fusion beats per-dispatch launch overhead — only pays off on a **discrete GPU**.
+The roadmap's open question is whether kernel fusion actually wins: the block
+benches are ~1.0× on an Apple M2 (compute-bound, unified memory; only the
+launch-bound elementwise probe shows ~2×). The thesis — fusion beats
+per-dispatch launch overhead — really pays off on a **discrete GPU**.
 
 The fusion benchmarks (`bench.js`, `fused-*.js`) are pure WebGPU: they touch only
 `navigator.gpu` and `performance.now()`, never the DOM. So they run under
@@ -35,7 +36,7 @@ The first block printed is the adapter. If it says `llvmpipe` / `lavapipe` /
 
 ## Colab (NVIDIA T4 — best effort)
 
-**One click:** open [`bench-colab.ipynb`](https://colab.research.google.com/github/abgnydn/draw-instant/blob/claude/admiring-feynman-nbo17d/bench-colab.ipynb)
+**One click:** open [`bench-colab.ipynb`](https://colab.research.google.com/github/abgnydn/draw-instant/blob/master/bench-colab.ipynb)
 in Colab and **Runtime → Run all** (it already requests a GPU runtime). The cells
 below are the same recipe, explained.
 
@@ -70,9 +71,9 @@ import os; os.environ["PATH"] = f"/root/.deno/bin:{os.environ['PATH']}"
 ```
 
 ```python
-# 4. Clone this branch and run. DENO_WEBGPU_BACKEND=vulkan forces the GPU path;
+# 4. Clone the repo and run. DENO_WEBGPU_BACKEND=vulkan forces the GPU path;
 #    add DENO_WEBGPU_ADAPTER_NAME=tesla if the banner still shows llvmpipe.
-!git clone -q -b claude/admiring-feynman-nbo17d https://github.com/abgnydn/draw-instant
+!git clone -q -b master https://github.com/abgnydn/draw-instant
 !cd draw-instant && DENO_WEBGPU_BACKEND=vulkan deno run --unstable-webgpu -A bench-headless.mjs
 ```
 

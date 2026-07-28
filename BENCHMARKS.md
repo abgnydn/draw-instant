@@ -26,13 +26,18 @@ can't masquerade as a win.
 
 ## Methodology
 
-- **Warm-up discarded.** The elementwise probe runs 25 iterations and times the
-  last 20 (`bench.js`: `RUNS = 25`, first 5 dropped). Block benchmarks warm the
-  pipeline before timing.
+- **Warm-up discarded.** The elementwise probe runs a separate 5-iteration
+  warm-up, then times 25 runs and reports the median (`bench.js`: `RUNS = 25`).
+  Block benchmarks warm the pipeline before timing.
+- **Nothing extraneous inside the timed window.** Bind groups are created once,
+  outside the timed loops — the timed region contains dispatches, not
+  descriptor churn. (An earlier version created them per-iteration, 6:1 against
+  the naive path; those numbers were biased and have been retired.)
 - **Same device, same session.** Naive and fused run back-to-back on the GPU
   that opened the page — no cross-machine comparisons.
-- **Correctness first.** Every block prints `max abs diff`. If it's not within
-  tolerance, the ms number is meaningless and labeled as such.
+- **Correctness first.** Every block prints `max abs diff`; the probe's
+  fused-vs-naive diff is measured by a one-time readback at boot, not asserted.
+  If it's not within tolerance, the ms number is meaningless and labeled as such.
 - **Reported live.** Numbers are rendered into the page from *your* run. The
   values below are the author's Apple M2 reference, not hardcoded results.
 
@@ -44,13 +49,13 @@ can't masquerade as a win.
 |---|---|---|---|
 | `bench.js` | elementwise chain | 1M floats, 6-op activation chain | 6 → 1 |
 | `fused-block.js` | FFN | `[B=2, S=1024, D=1280, D_FFN=5120]` | 4 → 2 |
-| `fused-attn.js` | self-attention | `[B=2, S=1024, heads=20×64]` | 5 → 1 |
+| `fused-attn.js` | self-attention op (Q/K/V given) | `[B=2, S=256, heads=20×64]` | 3 → 1 |
 | `fused-block-full.js` | full transformer block | `[B=2, S=256, D=1280, heads=20×64, D_FFN=5120]` | 14 → 9 |
-| `fused-groupnorm.js` | GroupNorm | U-Net resolutions | n → 1 |
-| `fused-conv.js` | Conv2d | U-Net resolutions | n → 1 |
-| `fused-resnet.js` | ResNet block | U-Net resolutions | n → 1 |
-| `fused-cross-attn.js` | cross-attention | SD-Turbo context dims | n → 1 |
-| `fused-tembed.js` | timestep embedding | sinusoidal + MLP | n → 1 |
+| `fused-groupnorm.js` | GroupNorm | `[B=1, C=1280, 16×16]`, G=32 | 2 → 1 |
+| `fused-conv.js` | Conv2d + SiLU + residual | `[B=1, C=1280, 16×16]`, 3×3 | 3 → 1 |
+| `fused-resnet.js` | ResNet block (GN/SiLU/conv/skip) | `[B=1, C=1280, 16×16]` | 9 → 4 |
+| `fused-cross-attn.js` | cross-attention | `[B=2, H=20, S_q=256, S_kv=77]` | 3 → 1 |
+| `fused-tembed.js` | timestep embedding | sinusoidal + MLP, 320→1280→1280 | 3 → 1 |
 
 The full transformer block is the unit that runs **~16× per U-Net forward pass**,
 so its per-block delta compounds across the denoise loop.
@@ -70,20 +75,24 @@ so its per-block delta compounds across the denoise loop.
 |---|---:|---:|---:|---|
 | FFN | 66.7 ms | 66.1 ms | 1.01× | 0 max abs diff |
 | Full transformer block | 28.6 ms | 28.3 ms | 1.01× | 8.0e-7 max abs diff |
-| Elementwise probe | — | — | ~1× | exact |
+| Elementwise probe | 0.60 ms | 0.30 ms | 2.0× | readback diff at boot |
 
 Supporting numbers: CLIP text encode ~60–90 ms; VAE graph is 525 nodes / 140
 tensors / ~99 MB.
 
 ### Reading these honestly
 
-On **Apple Silicon the fused path ties the naive path.** This is expected and it
-does **not** contradict the thesis:
+On **Apple Silicon the fused path ties the naive path on the compute-bound
+blocks.** This is expected and it does **not** contradict the thesis:
 
 - Apple's **unified memory** makes the global-memory round-trips that fusion
   removes nearly free. There's little launch/bandwidth overhead to eliminate.
-- The benchmarks are **compute-bound** on M2 at these shapes, so collapsing
-  dispatches doesn't move the wall clock.
+- The block benchmarks are **compute-bound** on M2 at these shapes, so
+  collapsing dispatches doesn't move the wall clock.
+- The **elementwise probe is the exception**: at sub-millisecond scale it is
+  launch-bound even on M2, and 6 → 1 dispatches shows ~2×. (An earlier 2.67×
+  figure was inflated by a diagnostic monkey-patch and per-iteration bind-group
+  creation inside the timed window; 2.0× is the unbiased number.)
 
 The win lives on **discrete GPUs**, where kernel-launch overhead dominates the
 sequential denoising loop. The same fusion approach this repo descends from

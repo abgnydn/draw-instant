@@ -64,7 +64,7 @@ Each version ships a real number, a real commit, and something the user can see.
 - `scheduler.js`: Euler Discrete scheduler (scaled-linear betas, trailing timestep spacing — matches diffusers SD-Turbo). `makeEulerScheduler(n)` → { timesteps, sigmas, initNoiseSigma, scaleModelInput, step }
 - `unet.js`: ORT Web session wrapper for `schmuell/sd-turbo-ort-web/unet/model.onnx` (1.73 GB). fp32↔fp16 converters for the fp16 graph. Streaming fetch with progress.
 - Denoise loop in pipeline.js: Load U-Net button → Euler loop → first latent [1, 4, 64, 64]. Canvas visualisation of 4 channels (not pixels — VAE is v3).
-- **Known gap:** cond-embedding dim mismatch. Our v0.3 text encoder is CLIP-base (dim 512); SD-Turbo U-Net expects OpenCLIP-ViT/H (dim 1024). v2 runs with a deterministic placeholder cond so we can measure ms/step and verify the scheduler math. Prompt alignment is not correct yet.
+- **Gap closed (v2.1):** the cond-embedding dim mismatch (v0.3 CLIP-base is 512-dim; SD-Turbo U-Net expects 1024-dim OpenCLIP-ViT/H) is fixed — `text-encoder.js` loads the matching 1024-dim schmuell encoder, so the denoise runs with real prompt conditioning. CLIP-base remains only as the v0.3 bootstrap path.
 
 ### v2.1 → matching text encoder + real prompt alignment
 - Load `schmuell/sd-turbo-ort-web/text_encoder/model.onnx` (raw ORT, not transformers.js) for the right 1024-dim output

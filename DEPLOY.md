@@ -5,10 +5,11 @@ assets). The Worker serves `index.html` + the ES modules from the repo root; the
 default URL is `https://draw-instant.<your-subdomain>.workers.dev`, and you can
 attach a custom domain.
 
-> **Weights are not deployed.** `*.onnx` is git-ignored and streamed from Hugging
-> Face at runtime (the 1.65 GB U-Net exceeds asset size limits anyway). The local
-> `./unet.onnx` fast-path is a development-only convenience; the hosted site uses
-> the HF fallback.
+> **Weights are not deployed.** `*.onnx` is git-ignored, listed in
+> [`.assetsignore`](./.assetsignore), and streamed from Hugging Face at runtime
+> (the 1.73 GB U-Net exceeds asset size limits anyway). The local `./unet.onnx`
+> fast-path is a development-only convenience; the hosted site uses the HF
+> fallback.
 
 ---
 
@@ -36,9 +37,8 @@ directory = "."          # serve the repo root; no Worker script
 [`.assetsignore`](./.assetsignore) keeps docs / tooling out of the upload.
 
 > ⚠️ **Production branch must contain this config.** Cloudflare builds from your
-> default branch (`master`). This deploy setup currently lives on the
-> `claude/laughing-sagan-g8q5jm` branch — **merge it into `master`** so the next
-> build picks up `wrangler.toml` + `.assetsignore` instead of auto-detecting.
+> default branch (`master`) — a build only picks up `wrangler.toml` +
+> `.assetsignore` once they're merged there.
 
 ---
 
@@ -70,7 +70,7 @@ fetch, or use a Cloudflare Transform Rule.
 
 Open the URL in a WebGPU browser: the preflight should report your GPU and the
 benchmark cards should run. The first **Generate** downloads weights from Hugging
-Face (cached in IndexedDB thereafter).
+Face (persisted via the Cache API thereafter).
 
 ---
 

@@ -12,10 +12,40 @@ v0→v5 milestones in [ROADMAP.md](./ROADMAP.md).
   this changelog, and a `CLAUDE.md` project guide.
 - `LICENSE` (MIT), `package.json` (`start` / `test` / `scope` scripts),
   `.gitignore`, and a CI workflow running the parser test.
+- `ops-test.html` — in-browser runner for the previously-orphaned
+  `wgsl-ops-test.js` kernel suite, plus batched-MatMul and negative-base Pow
+  cases (27/27 on M2).
+- Headless discrete-GPU bench tooling: `bench-headless.mjs` (Deno native
+  WebGPU), `bench-colab.ipynb`, `modal_bench.py` — see `BENCH.md`.
+- Cloudflare Workers (static assets) deploy: `wrangler.toml`, `.assetsignore`,
+  `DEPLOY.md`.
 
 ### Changed
 - Self-hosted WGSL engine (byte-level ONNX parser + op kernels + graph executor)
   runs the VAE decoder end-to-end; U-Net wiring in progress.
+
+### Fixed
+- Fusion probe unbiased: removed a temp `createBindGroup` stack-capture
+  diagnostic and hoisted bind-group creation out of the timed loops; the
+  fused-vs-naive diff is now measured by readback, not asserted. M2: 0.60 ms
+  naive / 0.30 ms fused = 2.0× (was 2.67× under the biased bench).
+- Live / morph / camera modes are mutually exclusive; the continuous loop
+  carries an epoch token (no zombie double loops); camera errors reuse the stop
+  path; a probe failure no longer disables Generate; the shared metrics bar
+  relabels itself per mode.
+- Model downloads persist via the Cache API (`draw-instant-models`) — HF's
+  no-store redirects defeated `force-cache`, so the 1.73 GB U-Net re-downloaded
+  on every page load.
+- Prompt padding uses id 0 after the first eos (OpenCLIP-H pad token), not
+  CLIP-base's 49407.
+- `vaeEncode` feeds fp16 (the vae-encoder graph I/O is fp16; the f32 feed
+  crashed camera mode); f32→f16 converts NaN to quiet NaN.
+- Executor/parser: batched MatMul (rank > 2) computes every batch, sign-aware
+  `pow`, packed float fields/attributes decoded from the correct span, dynamic
+  dims parse as -1, fail-loud guards replace silent-wrong paths.
+- Fused-bench headers and captions match what the kernels do (attention bench
+  is 3 → 1 with on-chip softmax; ResNet 9 → 4; cross-attn does full softmax
+  over S_kv=77, not streaming flash).
 
 ### Removed
 - Tracked `unet.onnx → /tmp/...` dangling symlink. The optional local-model path
@@ -30,10 +60,11 @@ v0→v5 milestones in [ROADMAP.md](./ROADMAP.md).
 - Apple M2: 28.6 ms naive / 28.3 ms fused (wash); correctness 8.0e-7 max abs diff.
 
 ## [1.1.0] — fused attention block
-- QKV projection + scaled-dot-product + output projection as a single-dispatch,
-  flash-attention-style kernel: online softmax in registers, K/V tiles in
-  workgroup memory, no global writes for intermediates.
-- Naive 5 dispatches → fused 1.
+- Scaled-dot-product attention (Q/K/V given — projections excluded to isolate
+  the fusion delta) as a single-dispatch, flash-attention-style kernel:
+  per-query-row scores softmaxed in workgroup memory, no global writes for
+  intermediates.
+- Naive 3 dispatches → fused 1.
 
 ## [1.0.0] — fused FFN block
 - Hand-fused WGSL FFN block (GELU + residual folded into matmul epilogues) at the
@@ -60,6 +91,3 @@ v0→v5 milestones in [ROADMAP.md](./ROADMAP.md).
 - `index.html` + `pipeline.js`, editorial aesthetic. WebGPU preflight with
   capability sniff (f16, workgroup storage, vendor). Prompt / steps / seed /
   guidance controls, metric bar, canvas target.
-
-[Unreleased]: https://github.com/abgnydn/draw-instant/compare/v1.2.0...HEAD
-[1.2.0]: https://github.com/abgnydn/draw-instant/releases/tag/v1.2.0

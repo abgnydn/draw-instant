@@ -37,13 +37,16 @@ work yet, what's approximate, and why — so nobody is surprised.
 
 ## Performance
 
-- **No speedup on Apple Silicon.** Unified memory makes the fused path a wash
-  (see [BENCHMARKS.md](./BENCHMARKS.md)). The thesis is a discrete-GPU claim, and
-  **discrete-GPU numbers are not yet measured in-repo** — we don't quote them
-  until they are.
-- **First load downloads multi-GB weights.** ~1.65 GB U-Net + ~650 MB text
-  encoder + ~99 MB VAE, fetched from Hugging Face and cached in IndexedDB. The
-  first generate on a fresh browser is download-bound, not compute-bound.
+- **No block-level speedup on Apple Silicon.** Unified memory makes the fused
+  path a wash on the compute-bound blocks; only the launch-bound elementwise
+  probe shows ~2× (see [BENCHMARKS.md](./BENCHMARKS.md)). The thesis is a
+  discrete-GPU claim, and **discrete-GPU numbers are not yet measured in-repo**
+  — we don't quote them until they are.
+- **First load downloads multi-GB weights.** ~1.73 GB U-Net + ~650 MB text
+  encoder + ~99 MB VAE decoder (+ ~68 MB VAE encoder for camera mode), fetched
+  from Hugging Face and persisted via the Cache API (`draw-instant-models`;
+  the transformers.js tokenizer path uses IndexedDB). The first generate on a
+  fresh browser is download-bound, not compute-bound.
 
 ## Platform
 
@@ -52,13 +55,6 @@ work yet, what's approximate, and why — so nobody is surprised.
   device's capability rather than degrading silently.
 - **f16 shader support is sniffed, not assumed.** Devices without it still run
   via in-shader conversion, with the associated cost.
-
-## Code artifacts
-
-- **`index.html` ships a `// TEMP DIAGNOSTIC` block** that monkeypatches
-  `navigator.gpu` to capture a stack trace on failing `createBindGroup` calls.
-  It's live debugging aid for the U-Net bind-group work, not production code —
-  expect it to be removed once the WGSL U-Net path is stable.
 
 ---
 
