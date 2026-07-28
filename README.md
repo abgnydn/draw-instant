@@ -104,11 +104,12 @@ eliminates nearly free — there's little launch/bandwidth overhead left to
 remove. The tiny elementwise probe is the exception: at sub-millisecond scale
 it's launch-bound even on M2, and collapsing 6 dispatches to 1 shows ~2×.
 
-🟢 **Discrete GPUs are the target.** Kernel-launch overhead dominates there, and
-the same fusion work this repo descends from delivered **159–720× over PyTorch**
-on the benchmark fleet (and 826× on a Qualcomm Adreno). Discrete-GPU step
-numbers are the next data point we publish — see [BENCHMARKS.md](./BENCHMARKS.md)
-for methodology and how to reproduce on your hardware.
+🟢 **Discrete GPUs are the target.** Kernel-launch overhead dominates there.
+The in-repo head-to-head on the same op chain and the same M2: fused WGSL
+**0.30 ms** vs PyTorch eager MPS **0.35 ms** vs our naive path 0.60 ms —
+`uv run bench-torch.py` reproduces it on your machine. Bigger multipliers on
+discrete and mobile GPUs are the thesis, and we won't quote any until they're
+measured from this repo — see [BENCHMARKS.md](./BENCHMARKS.md) for methodology.
 
 > **We publish what we measured, even when we lose.** A benchmark that hides a
 > wash is worse than no benchmark.
@@ -292,7 +293,7 @@ The non-negotiables (full text in [CONTRIBUTING.md](./CONTRIBUTING.md)):
 | U-Net dispatches today | **60+ / step** | ORT Web — the overhead we're collapsing |
 | Fused full block | **14 → 9 dispatches** | what the math allows at equal kernel quality |
 | Fused attention | **3 → 1 dispatch** | flash-style single dispatch, softmax on-chip |
-| Fleet precedent | **159–720×** | the fusion work this repo descends from, over PyTorch |
+| PyTorch head-to-head | **0.30 vs 0.35 ms** | fused WGSL vs torch eager MPS, same chain + machine — `uv run bench-torch.py` |
 | SD-Turbo steps | **1–4** | Euler Discrete schedule |
 | Latent / image | **[1,4,64,64] / [1,3,512,512]** | VAE scaling factor 0.18215 |
 | Kernel gate | **< 1e-4** | max abs diff vs. CPU reference |

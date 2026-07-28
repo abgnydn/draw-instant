@@ -95,10 +95,28 @@ blocks.** This is expected and it does **not** contradict the thesis:
   creation inside the timed window; 2.0× is the unbiased number.)
 
 The win lives on **discrete GPUs**, where kernel-launch overhead dominates the
-sequential denoising loop. The same fusion approach this repo descends from
-delivered **159–720× over PyTorch** on the benchmark fleet, and **826×** on a
-Qualcomm Adreno. Discrete-GPU per-step numbers are the next data point — they're
-not in this table yet, and we won't quote them until they're measured here.
+sequential denoising loop. Discrete-GPU per-step numbers are the next data
+point — they're not in this table yet, and we won't quote them (or any external
+precedent) until they're measured from this repo.
+
+## PyTorch head-to-head (`bench-torch.py`)
+
+Same op chain as the boot probe, same methodology (separate 5-run warm-up,
+25 timed runs, median, device-fenced), same machine. Eager PyTorch is the
+analogue of the naive path: one kernel launch per op, every intermediate
+materialized to memory.
+
+| path | Apple M2 (ms) |
+| --- | --- |
+| fused WGSL (browser probe) | **0.30** |
+| PyTorch eager, MPS | 0.35 |
+| naive WGSL, 6 dispatches | 0.60 |
+| PyTorch eager, CPU | 1.41 |
+
+On Apple unified memory, eager MPS is already efficient — fused-vs-torch is
+~1.2× here, not a blowout; the naive WGSL path loses to torch outright.
+Reproduce on your hardware: `uv run bench-torch.py` (PEP 723 pulls torch),
+then compare against the fused/naive ms the page prints on the same machine.
 
 ---
 

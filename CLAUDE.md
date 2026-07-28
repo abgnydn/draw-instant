@@ -16,6 +16,7 @@ a handful. See `README.md` for the pitch, `ARCHITECTURE.md` for the design,
 npm start        # python3 -m http.server 8787  → open http://localhost:8787
 npm test         # node onnx-parser-test.mjs (the only headless test; no WebGPU)
 npm run scope    # node scope-nodes.mjs <model.onnx> — op histogram for a model
+npm run bench:torch  # uv run bench-torch.py — PyTorch head-to-head for the boot probe
 npm run deploy   # npx wrangler deploy — Cloudflare Workers static assets (DEPLOY.md)
 ```
 
