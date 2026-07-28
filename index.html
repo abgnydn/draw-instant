@@ -2,32 +2,6 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <script>
-    // TEMP DIAGNOSTIC: capture stack at every failing createBindGroup.
-    (function(){
-      if (!navigator.gpu) return;
-      const origRA = navigator.gpu.requestAdapter.bind(navigator.gpu);
-      navigator.gpu.requestAdapter = async function(...a){
-        const ad = await origRA(...a);
-        if (!ad) return ad;
-        const origRD = ad.requestDevice.bind(ad);
-        ad.requestDevice = async function(...b){
-          const dev = await origRD(...b);
-          dev.addEventListener('uncapturederror', (e) => {
-            console.error('[WGPU UNCAPTURED]', e.error && e.error.message, '\n', window.__lastCBGStack || '(no stack captured)');
-          });
-          const origCBG = dev.createBindGroup.bind(dev);
-          dev.createBindGroup = function(desc){
-            window.__lastCBGStack = new Error('cbg-callsite').stack;
-            const bg = origCBG(desc);
-            return bg;
-          };
-          return dev;
-        };
-        return ad;
-      };
-    })();
-  </script>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>draw.instant — AI image generation that updates as you type</title>
   <meta name="description" content="Real-time image generation in your browser. 100% on-device. No server, no login, no upload. Powered by WebGPU kernel fusion." />
@@ -174,6 +148,17 @@
     button.go:hover:not(:disabled) { filter: brightness(1.1); }
     button.go:disabled { opacity: 0.4; cursor: not-allowed; }
 
+    /* Secondary mode buttons injected by pipeline.js (morph, camera). */
+    button.btn {
+      padding: 10px 20px; font-size: 13px; font-weight: 600;
+      background: transparent; color: var(--accent);
+      border: 1px solid var(--accent); border-radius: 8px;
+      cursor: pointer; transition: filter .15s, opacity .15s, background .15s, color .15s;
+    }
+    button.btn:hover:not(:disabled) { filter: brightness(1.1); }
+    button.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    button.btn.live { background: var(--accent); color: #0a0a0a; }
+
     /* Metrics bar */
     .metrics {
       display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px;
@@ -257,12 +242,12 @@
       <section class="stage">
         <div class="canvas-card">
           <div class="canvas-wrap">
-            <canvas id="view" width="512" height="512"></canvas>
+            <canvas id="view" width="512" height="512" role="img" aria-label="Generated image"></canvas>
             <div class="canvas-placeholder" id="canvas-placeholder">
               [ canvas — preview renders here ]
             </div>
           </div>
-          <div class="status-line" id="status">idle</div>
+          <div class="status-line" id="status" role="status" aria-live="polite">idle</div>
         </div>
 
         <div class="controls-card">
@@ -316,15 +301,15 @@
 
       <div class="metrics">
         <div class="metric">
-          <div class="metric-lbl">fused · ms</div>
+          <div class="metric-lbl" id="m-step-lbl">fused · ms</div>
           <div class="metric-val accent" id="m-step">—</div>
         </div>
         <div class="metric">
-          <div class="metric-lbl">naive · ms</div>
+          <div class="metric-lbl" id="m-total-lbl">naive · ms</div>
           <div class="metric-val" id="m-total">—</div>
         </div>
         <div class="metric">
-          <div class="metric-lbl">speedup</div>
+          <div class="metric-lbl" id="m-disp-lbl">speedup</div>
           <div class="metric-val accent" id="m-disp">—</div>
         </div>
         <div class="metric">
@@ -335,7 +320,7 @@
       <p class="mono" style="color: var(--muted); font-size: 11px; margin: -20px 0 8px; letter-spacing: 0.04em;">
         Probe: element-wise chain (mul·add → relu → sub → tanh → mul → sigmoid) over 1M floats.
         Fused = 1 dispatch, chain lives in registers. Naive = 6 dispatches, intermediates in global memory.
-        Both produce identical output; the delta is pure dispatch + memory-traffic overhead.
+        Both paths are diffed against each other at boot (max abs Δ in the status line); the delta is pure dispatch + memory-traffic overhead.
       </p>
       <p id="probe-interp" style="color: var(--muted); font-size: 13px; margin: 0 0 32px; max-width: 720px;">
         Waiting for probe…
@@ -521,7 +506,7 @@
         <div class="metric"><div class="metric-lbl">max abs Δ</div><div class="metric-val mono" style="font-size: 12px;">—</div></div>
       </div>
       <p class="mono" style="color: var(--muted); font-size: 11px; margin: -20px 0 8px; letter-spacing: 0.04em;">
-        Cross-attn at SD-Turbo mid-block shape [B=2·H=20·S_q=256·S_kv=77·head=64]. Queries from the image feature map, K/V from text cond. Naive = 3 dispatches with scores [S_q × S_kv] in global memory. Fused = 1 dispatch, streaming softmax over S_kv. Called ~32× per U-Net forward pass.
+        Cross-attn at SD-Turbo mid-block shape [B=2·H=20·S_q=256·S_kv=77·head=64]. Queries from the image feature map, K/V from text cond. Naive = 3 dispatches with scores [S_q × S_kv] in global memory. Fused = 1 dispatch, softmax kept on-chip in workgroup memory. Called ~32× per U-Net forward pass.
       </p>
       <p id="xattn-interp" style="color: var(--muted); font-size: 13px; margin: 0 0 32px; max-width: 720px;">
         Waiting for cross-attention benchmark…

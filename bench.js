@@ -16,7 +16,7 @@
 // isolates the thing we care about: dispatch count vs. identical arithmetic.
 
 const N_ELEMENTS = 1 << 20 // 1M elements, ~4MB per f32 buffer
-const RUNS = 25            // warm-up 5 discarded, time the last 20
+const RUNS = 25            // timed runs (a separate 5-run warm-up precedes timing)
 const WORKGROUP = 256
 
 const WGSL_NAIVE_STEP = (op) => `
@@ -125,33 +125,21 @@ async function runPass(device, pipeline, bindGroup, dispatches) {
   device.queue.submit([enc.finish()])
 }
 
-async function runNaiveChain(device, pipelines, buffers, dispatches) {
+async function runNaiveChain(device, pipelines, bgs, dispatches) {
   // Chain: muladd(a,b)->s1 ; relu(s1)->s2 ; sub(s2)->s3 ; tanh(s3)->s4 ; mul(s4)->s5 ; sigmoid(s5)->out
-  const { a, b, s1, s2, s3, s4, s5, out } = buffers
-  const bg = [
-    makeBindGroup(device, pipelines.muladd,  [a,  b,  s1]),
-    // 1-input shaders declare bindings 0 + 2 only.
-    makeBindGroup(device, pipelines.relu,    [s1, s2],  [0, 2]),
-    makeBindGroup(device, pipelines.sub,     [s2, s3],  [0, 2]),
-    makeBindGroup(device, pipelines.tanh,    [s3, s4],  [0, 2]),
-    makeBindGroup(device, pipelines.mul,     [s4, s5],  [0, 2]),
-    makeBindGroup(device, pipelines.sigmoid, [s5, out], [0, 2]),
-  ]
   const enc = device.createCommandEncoder()
   const pass = enc.beginComputePass()
-  pass.setPipeline(pipelines.muladd);  pass.setBindGroup(0, bg[0]); pass.dispatchWorkgroups(dispatches)
-  pass.setPipeline(pipelines.relu);    pass.setBindGroup(0, bg[1]); pass.dispatchWorkgroups(dispatches)
-  pass.setPipeline(pipelines.sub);     pass.setBindGroup(0, bg[2]); pass.dispatchWorkgroups(dispatches)
-  pass.setPipeline(pipelines.tanh);    pass.setBindGroup(0, bg[3]); pass.dispatchWorkgroups(dispatches)
-  pass.setPipeline(pipelines.mul);     pass.setBindGroup(0, bg[4]); pass.dispatchWorkgroups(dispatches)
-  pass.setPipeline(pipelines.sigmoid); pass.setBindGroup(0, bg[5]); pass.dispatchWorkgroups(dispatches)
+  pass.setPipeline(pipelines.muladd);  pass.setBindGroup(0, bgs[0]); pass.dispatchWorkgroups(dispatches)
+  pass.setPipeline(pipelines.relu);    pass.setBindGroup(0, bgs[1]); pass.dispatchWorkgroups(dispatches)
+  pass.setPipeline(pipelines.sub);     pass.setBindGroup(0, bgs[2]); pass.dispatchWorkgroups(dispatches)
+  pass.setPipeline(pipelines.tanh);    pass.setBindGroup(0, bgs[3]); pass.dispatchWorkgroups(dispatches)
+  pass.setPipeline(pipelines.mul);     pass.setBindGroup(0, bgs[4]); pass.dispatchWorkgroups(dispatches)
+  pass.setPipeline(pipelines.sigmoid); pass.setBindGroup(0, bgs[5]); pass.dispatchWorkgroups(dispatches)
   pass.end()
   device.queue.submit([enc.finish()])
 }
 
-async function runFused(device, pipeline, buffers, dispatches) {
-  const { a, b, out } = buffers
-  const bg = makeBindGroup(device, pipeline, [a, b, out])
+async function runFused(device, pipeline, bg, dispatches) {
   await runPass(device, pipeline, bg, dispatches)
 }
 
@@ -188,13 +176,48 @@ export async function runFusionProbe(onProgress = () => {}) {
     fused:   makePipeline(device, WGSL_FUSED),
   }
 
+  // Bind groups once, outside the timed loops — buffers never change between
+  // iterations. 1-input shaders declare bindings 0 + 2 only.
+  const naiveBGs = [
+    makeBindGroup(device, pipelines.muladd,  [buffers.a,  buffers.b,  buffers.s1]),
+    makeBindGroup(device, pipelines.relu,    [buffers.s1, buffers.s2],  [0, 2]),
+    makeBindGroup(device, pipelines.sub,     [buffers.s2, buffers.s3],  [0, 2]),
+    makeBindGroup(device, pipelines.tanh,    [buffers.s3, buffers.s4],  [0, 2]),
+    makeBindGroup(device, pipelines.mul,     [buffers.s4, buffers.s5],  [0, 2]),
+    makeBindGroup(device, pipelines.sigmoid, [buffers.s5, buffers.out], [0, 2]),
+  ]
+  const fusedBG = makeBindGroup(device, pipelines.fused, [buffers.a, buffers.b, buffers.out])
+
+  // One-time correctness check: both paths write `out`, so read the naive
+  // result back before the fused run overwrites it.
+  onProgress('correctness check…')
+  const readBack = async (src, n) => {
+    const read = device.createBuffer({ size: n * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ })
+    const enc = device.createCommandEncoder()
+    enc.copyBufferToBuffer(src, 0, read, 0, n * 4)
+    device.queue.submit([enc.finish()])
+    await read.mapAsync(GPUMapMode.READ)
+    const copy = new Float32Array(read.getMappedRange().slice(0))
+    read.unmap(); read.destroy()
+    return copy
+  }
+  const nCheck = 4096
+  await runNaiveChain(device, pipelines, naiveBGs, dispatches)
+  await waitForGpu(device)
+  const outNaive = await readBack(buffers.out, nCheck)
+  await runFused(device, pipelines.fused, fusedBG, dispatches)
+  await waitForGpu(device)
+  const outFused = await readBack(buffers.out, nCheck)
+  let maxAbsDiff = 0
+  for (let i = 0; i < nCheck; i++) { const d = Math.abs(outNaive[i] - outFused[i]); if (d > maxAbsDiff) maxAbsDiff = d }
+
   // Warm-up + timed runs. We use CPU-side wall clock with queue.onSubmittedWorkDone
   // as the sync barrier — timestamp-query isn't universal across devices yet and
-  // for a 20-sample mean the wall-clock noise is fine for relative comparison.
+  // for a 25-sample median the wall-clock noise is fine for relative comparison.
   onProgress('warming up…')
   for (let i = 0; i < 5; i++) {
-    await runNaiveChain(device, pipelines, buffers, dispatches)
-    await runFused(device, pipelines.fused, buffers, dispatches)
+    await runNaiveChain(device, pipelines, naiveBGs, dispatches)
+    await runFused(device, pipelines.fused, fusedBG, dispatches)
   }
   await waitForGpu(device)
 
@@ -202,7 +225,7 @@ export async function runFusionProbe(onProgress = () => {}) {
   const naiveMs = []
   for (let i = 0; i < RUNS; i++) {
     const t0 = performance.now()
-    await runNaiveChain(device, pipelines, buffers, dispatches)
+    await runNaiveChain(device, pipelines, naiveBGs, dispatches)
     await waitForGpu(device)
     naiveMs.push(performance.now() - t0)
   }
@@ -211,7 +234,7 @@ export async function runFusionProbe(onProgress = () => {}) {
   const fusedMs = []
   for (let i = 0; i < RUNS; i++) {
     const t0 = performance.now()
-    await runFused(device, pipelines.fused, buffers, dispatches)
+    await runFused(device, pipelines.fused, fusedBG, dispatches)
     await waitForGpu(device)
     fusedMs.push(performance.now() - t0)
   }
@@ -228,17 +251,10 @@ export async function runFusionProbe(onProgress = () => {}) {
   const fused = med(fusedMs)
   const speedup = naive / fused
 
-  // Bytes of intermediates the naive path moves through global memory per run:
-  // 5 scratch writes + 5 scratch reads = 10 * n * 4 bytes. Fused path: 0.
-  const savedBytes = 10 * n * 4
-  const savedGB = savedBytes / (1024 * 1024 * 1024)
-  const savedGBs = savedGB / ((naive - fused) / 1000) // GB/s of bandwidth reclaimed
-
   return {
     naive, fused, speedup,
     naiveRuns: naiveMs, fusedRuns: fusedMs,
     elements: n,
-    savedBytes,
-    reclaimedBW: Number.isFinite(savedGBs) ? savedGBs : null,
+    correctness: { maxAbsDiff },
   }
 }
