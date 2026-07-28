@@ -1,0 +1,7 @@
+# model artifacts — fetched at runtime, never committed
+*.onnx
+
+# local junk
+.DS_Store
+__pycache__/
+node_modules/
