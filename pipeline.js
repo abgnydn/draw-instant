@@ -779,21 +779,21 @@ async function continuousLoop() {
         setMetricLabels('frame · ms', 'fps', 'mode')
         ui.mStep.textContent = frameMs.toFixed(0)
         ui.mTotal.textContent = fps.toFixed(2)
-        ui.mDisp.textContent = 'morph'
-        setStatus(`continuous · ${fps.toFixed(2)} fps · type to morph · "${prompt.slice(0, 28)}${prompt.length > 28 ? '…' : ''}"`, true)
+        ui.mDisp.textContent = 'loop'
+        setStatus(`loop · ${fps.toFixed(2)} fps · runs until you stop it · "${prompt.slice(0, 28)}${prompt.length > 28 ? '…' : ''}"`, true)
         fpsT0 = performance.now(); fpsFrames = 0
         // HUD overlay for prompt/fps on the canvas itself.
         ctx2.fillStyle = 'rgba(0,0,0,0.55)'
         ctx2.fillRect(0, 484, 512, 28)
         ctx2.fillStyle = '#ff5a1f'
         ctx2.font = '11px "JetBrains Mono", monospace'
-        ctx2.fillText(`morph · ${fps.toFixed(2)} fps · ${frameMs.toFixed(0)} ms/frame · VAE ${decodeMs.toFixed(0)} ms`, 14, 502)
+        ctx2.fillText(`loop · ${fps.toFixed(2)} fps · ${frameMs.toFixed(0)} ms/frame · VAE ${decodeMs.toFixed(0)} ms`, 14, 502)
       }
       // Yield so input events flush.
       await new Promise((r) => setTimeout(r, 0))
     } catch (e) {
       console.error('[continuous] frame failed', e)
-      setStatus(`continuous frame failed: ${e.message}`, false)
+      setStatus(`loop frame failed: ${e.message}`, false)
       await new Promise((r) => setTimeout(r, 200))
     }
   }
@@ -801,7 +801,7 @@ async function continuousLoop() {
   // loop's flag or status — only the current loop reports shutdown.
   if (myEpoch === _continuousEpoch) {
     _continuousRunning = false
-    setStatus(`continuous stopped · ${_continuousFrameCount} frames in ${((performance.now() - t0) / 1000).toFixed(1)}s`, false)
+    setStatus(`loop stopped · ${_continuousFrameCount} frames in ${((performance.now() - t0) / 1000).toFixed(1)}s`, false)
   }
 }
 
@@ -810,11 +810,11 @@ function toggleContinuousMode() {
   const btn = document.getElementById('continuous-btn')
   if (_continuousMode) {
     if (_cameraRunning) onToggleCamera()  // camera and morph are mutually exclusive
-    if (btn) { btn.textContent = 'Stop morph mode'; btn.classList.add('live') }
+    if (btn) { btn.textContent = 'Stop continuous loop'; btn.classList.add('live') }
     // Kick off immediately if prompt present.
     scheduleLiveDenoise()
   } else {
-    if (btn) { btn.textContent = 'Morph as you type (realtime)'; btn.classList.remove('live') }
+    if (btn) { btn.textContent = 'Keep generating (continuous loop)'; btn.classList.remove('live') }
     _continuousRunning = false  // cooperative stop
   }
 }
@@ -823,10 +823,10 @@ function installContinuousButton() {
   if (document.getElementById('continuous-btn')) return
   const btn = document.createElement('button')
   btn.id = 'continuous-btn'
-  btn.textContent = 'Morph as you type (realtime)'
+  btn.textContent = 'Keep generating (continuous loop)'
   btn.className = 'btn'
   btn.style.cssText = 'margin-top: 10px; width: 100%;'
-  btn.title = 'Continuous denoising loop — image morphs smoothly as you type instead of flashing on each keystroke.'
+  btn.title = 'Runs the denoise loop back-to-back instead of once per keystroke. The image keeps evolving even when you stop typing, and picks up prompt changes on the next frame. Typing already regenerates without this — the toggle only changes whether the loop ever stops.'
   btn.addEventListener('click', toggleContinuousMode)
   if (ui.go && ui.go.parentNode) ui.go.parentNode.insertBefore(btn, ui.go.nextSibling)
 }

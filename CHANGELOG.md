@@ -29,7 +29,7 @@ v0→v5 milestones in [ROADMAP.md](./ROADMAP.md).
   diagnostic and hoisted bind-group creation out of the timed loops; the
   fused-vs-naive diff is now measured by readback, not asserted. M2: 0.60 ms
   naive / 0.30 ms fused = 2.0× (was 2.67× under the biased bench).
-- Live / morph / camera modes are mutually exclusive; the continuous loop
+- Live / loop / camera modes are mutually exclusive; the continuous loop
   carries an epoch token (no zombie double loops); camera errors reuse the stop
   path; a probe failure no longer disables Generate; the shared metrics bar
   relabels itself per mode.

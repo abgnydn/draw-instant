@@ -17,7 +17,7 @@ pipeline, side by side:
 | Engine | ONNX Runtime Web, WebGPU EP | hand-written WGSL kernels + graph executor |
 | Files | `ort.js`, `sd.js`, `unet.js`, `vae.js`, `vae-encoder.js`, `text-encoder.js` | `wgsl-ops.js`, `wgsl-executor.js`, `onnx-parser.js`, `unet-wgsl.js`, `vae-wgsl.js` |
 | Role | the number we have to beat | the number we're trying to land |
-| Status | runs end-to-end (prompt → image; live / morph / camera modes) | runs the VAE; U-Net wiring in progress |
+| Status | runs end-to-end (prompt → image; live / loop / camera modes) | runs the VAE; U-Net wiring in progress |
 
 The reference path exists so every claim is measured against a credible
 baseline on the *same device*. The fusion path is where the work is.

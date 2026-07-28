@@ -45,7 +45,7 @@ U-Net denoiser, computed on your own GPU, in the tab. No server, no upload.**
 
 - **Not a finished product.** The fused self-hosted U-Net is mid-wiring (see
   [Status](#status) and [LIMITATIONS.md](./LIMITATIONS.md)). The ORT reference
-  path generates real images today — including live, morph, and camera modes;
+  path generates real images today — including live, continuous-loop, and camera modes;
   the all-our-kernels path runs the VAE and is being extended to the U-Net.
 - **Not faster than ORT on Apple Silicon.** On unified memory the fused path
   *ties* the naive path on the compute-bound blocks — and we publish that, in
@@ -77,7 +77,7 @@ The page opens with a generate panel and a column of live benchmark cards.
 
 | Panel | What it shows |
 |---|---|
-| **Generate** | prompt · steps (1–8) · seed · guidance · resolution → 512×512 canvas; one click loads the models, then as-you-type live mode, a continuous morph loop, and a camera mirror (img2img). The shared metric bar relabels itself per mode |
+| **Generate** | prompt · steps (1–8) · seed · resolution → 512×512 canvas (no guidance control — SD-Turbo is distilled to run guidance-free); one click loads the models, then as-you-type live mode, a continuous generate loop, and a camera mirror (img2img). The shared metric bar relabels itself per mode |
 | **Fusion benchmark cards** | elementwise probe, FFN, attention, full transformer block, GroupNorm, Conv2d, ResNet, cross-attention, timestep-embed — each runs naive-vs-fused live and prints ms + max-abs-diff for *your* GPU |
 | **Schema sniff** | one-time fetch that confirms the real SD-Turbo U-Net input/output signature |
 
@@ -222,7 +222,7 @@ verification strategy — read **[ARCHITECTURE.md](./ARCHITECTURE.md)**.
 | Custom WGSL engine (parser + ops + executor, runs the VAE) | ✅ |
 | Self-hosted WGSL U-Net denoise loop | 🚧 |
 | First end-to-end image under our own U-Net kernels | ⏳ |
-| As-you-type live preview · morph loop · live camera mirror (ORT U-Net) | ✅ |
+| As-you-type live preview · continuous loop · live camera mirror (ORT U-Net) | ✅ |
 
 Full v0→v5 trajectory: [ROADMAP.md](./ROADMAP.md). Version history:
 [CHANGELOG.md](./CHANGELOG.md).
