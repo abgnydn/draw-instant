@@ -1,7 +1,34 @@
-# model artifacts — fetched at runtime, never committed
+# ─── Model weights ───────────────────────────────────────────────────────────
+# SD-Turbo weights are fetched from Hugging Face on demand and cached in the
+# browser's IndexedDB — never commit them. For the local WGSL U-Net path you can
+# drop a copy of `unet.onnx` in the repo root (see README → "Models"); it stays
+# ignored. The 1.65 GB U-Net is exactly why this rule exists.
 *.onnx
+*.onnx.data
+*.ort
+*.safetensors
+*.pb
 
-# local junk
-.DS_Store
-__pycache__/
+# ─── Node ────────────────────────────────────────────────────────────────────
 node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ─── Python (onnx_surgery.py, scope tooling) ─────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ─── OS / editor cruft ───────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+
+# ─── Scratch / logs ──────────────────────────────────────────────────────────
+*.log
+tmp/
+scratch/
