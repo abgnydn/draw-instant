@@ -127,6 +127,18 @@ export async function loadSDTurbo(onProgress = () => {}) {
   return _loadInfo
 }
 
+// v4: tokenizer-only load. Live mode needs the CLIP tokenizer but not the
+// CLIP-base text-encoder session — encoding goes through encodeSDPrompt.
+export async function loadTokenizer(onProgress = () => {}) {
+  if (_tokenizer) return _tokenizer
+  const tx = await importTx()
+  onProgress('loading tokenizer…', 0)
+  _tokenizer = await tx.AutoTokenizer.from_pretrained(MODEL_ID, {
+    progress_callback: progressAdapter(onProgress),
+  })
+  return _tokenizer
+}
+
 export async function encodePrompt(text) {
   if (!_tokenizer || !_textEncoder) throw new Error('Text encoder not loaded — call loadSDTurbo() first')
 

@@ -9,9 +9,9 @@
 //   for step in [0..N):
 //     model_in  = latent_in / sqrt(sigma^2 + 1)     (timestep-independent pre-cond)
 //     noise_pred = unet(model_in, t_step, cond)
-//     latent_out = latent_in - sigma * noise_pred   (Euler update)
+//     latent_out = latent_in + (sigma_next - sigma) * noise_pred   (Euler update, epsilon pred)
 //     latent_in  = latent_out
-//   final latent = latent_out
+//   final latent = latent_out   (sigma_next = 0 on the last step)
 //
 // For CFG (classifier-free guidance) we pass [uncond; cond] through the UNet
 // in one batch-2 call and combine: pred = uncond + g * (cond - uncond).

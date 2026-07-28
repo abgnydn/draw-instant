@@ -1,0 +1,16 @@
+# Cloudflare Workers (static assets) configuration for draw.instant.
+#
+# This is a no-build static site: index.html + hand-authored ES modules at the
+# repo root, served as Workers static assets with no Worker script (`main` is
+# intentionally omitted — assets-only). Model weights (*.onnx) are git-ignored
+# and streamed from Hugging Face at runtime, so they're never deployed.
+#
+# Deploy:  npm run deploy  (→ npx wrangler deploy)  — or Cloudflare's Git build,
+# which runs the same `wrangler deploy` on every push to the production branch.
+# `.assetsignore` trims the uploaded file set. See DEPLOY.md.
+
+name = "draw-instant"
+compatibility_date = "2026-06-25"
+
+[assets]
+directory = "."

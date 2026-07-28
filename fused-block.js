@@ -66,7 +66,8 @@ var<workgroup> Bsub : array<f32, ${WG * WG}>;
 
 fn gelu(x : f32) -> f32 {
   // GELU(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
-  // Approximated with the tanh form Hendrycks+ '16 — identical to what SD uses.
+  // Tanh approximation (Hendrycks+ '16) of the exact-erf GELU SD uses — close
+  // (~1e-3 abs worst case) but not identical. Both paths here share this form.
   let c = 0.044715;
   let s = 0.7978845608; // sqrt(2/pi)
   return 0.5 * x * (1.0 + tanh(s * (x + c * x * x * x)));
@@ -280,7 +281,8 @@ export async function runFFNBench(onProgress = () => {}) {
   }
 
   // Correctness check — naive and fused must produce the same output to within
-  // float tolerance. If they don't, the benchmark is meaningless.
+  // float tolerance. Spot-check only: compares the first 1024 of the 2.6M
+  // outputs (part of row 0), not the full tensor.
   onProgress('correctness check…')
   runNaive(); runFused()
   await waitGpu(device)

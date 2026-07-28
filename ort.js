@@ -48,14 +48,16 @@ export async function initORT(onProgress = () => {}) {
 export function getORT() { return _ort }
 export function getORTInfo() { return _info }
 
-// Placeholder for v0.3: create a WebGPU-backed InferenceSession from a URL.
-// Not wired yet because model download is the real v0.3 commitment.
+// Create a WebGPU-backed InferenceSession from model bytes (or a URL).
+// Live session factory for all four model loaders (unet/vae/vae-encoder/text-encoder).
 export async function createSession(modelUrlOrBytes, opts = {}) {
   if (!_ort) throw new Error('ORT not initialized — call initORT() first')
+  // `providers` is our own key, not an ORT option — keep it out of sessionOptions.
+  const { providers, ...rest } = opts
   const sessionOptions = {
-    executionProviders: opts.providers || _info.providers,
+    executionProviders: providers || _info.providers,
     graphOptimizationLevel: 'all',
-    ...opts,
+    ...rest,
   }
   const t0 = performance.now()
   const session = await _ort.InferenceSession.create(modelUrlOrBytes, sessionOptions)

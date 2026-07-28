@@ -1,0 +1,18 @@
+# Trim the deployed asset set (gitignore-style patterns). The browser only needs
+# index.html, the .js modules, and the *-test.html diagnostic harnesses — nothing
+# listed here is loaded at runtime, so it doesn't need to be a public asset.
+.github/
+.claude/
+*.md
+*.py
+*.mjs
+*.toml
+*.cff
+*.ipynb
+# Never upload local dev model weights (a ./unet.onnx copy is a legit dev
+# fast-path but is 1.73 GB — it must not ride along on `wrangler deploy`).
+*.onnx
+package.json
+LICENSE
+.gitignore
+.assetsignore

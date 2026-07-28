@@ -39,9 +39,10 @@
 
     document.getElementById('btn-clear').onclick = () => { log.textContent = '' }
 
-    const setVerboseFlags = async () => {
+    // Takes the caller's cache-bust version so the flags land on the same
+    // executor/ops instances that vae-wgsl.js?v=<v> loads internally.
+    const setVerboseFlags = async (v) => {
       const on = document.getElementById('cb-verbose').checked
-      const v = Date.now()
       const ex = await import('./wgsl-executor.js?v=' + v)
       const ops = await import('./wgsl-ops.js?v=' + v)
       ex.LOG.verbose = on
@@ -53,8 +54,9 @@
     const runCkpt = async (K) => {
       try {
         println(`importing vae-wgsl (K=${K})…`)
-        await setVerboseFlags()
-        const { loadVAEWGSL, vaeDecodeCheckpoint } = await import('./vae-wgsl.js?v=' + Date.now())
+        const v = Date.now()
+        await setVerboseFlags(v)
+        const { loadVAEWGSL, vaeDecodeCheckpoint } = await import('./vae-wgsl.js?v=' + v)
         println('loading VAE…')
         await loadVAEWGSL((msg, frac) => println(`  [${(frac * 100).toFixed(0)}%] ${msg}`))
         println(`running checkpointed walk K=${K}…`)
@@ -77,8 +79,9 @@
     const runTiny = async (repeat = 1) => {
       try {
         println(`importing vae-wgsl (tiny 8×8, repeat=${repeat})…`)
-        await setVerboseFlags()
-        const { loadVAEWGSL, vaeDecodeWGSL } = await import('./vae-wgsl.js?v=' + Date.now())
+        const v = Date.now()
+        await setVerboseFlags(v)
+        const { loadVAEWGSL, vaeDecodeWGSL } = await import('./vae-wgsl.js?v=' + v)
         println('loading VAE…')
         await loadVAEWGSL((msg, frac) => println(`  [${(frac * 100).toFixed(0)}%] ${msg}`))
         const latent = new Float32Array(1 * 4 * 8 * 8)
@@ -213,8 +216,9 @@
     document.getElementById('btn-diag').onclick = async () => {
       try {
         println('importing vae-wgsl…')
-        await setVerboseFlags()
-        const { loadVAEWGSL, vaeDecodeDiag } = await import('./vae-wgsl.js?v=' + Date.now())
+        const v = Date.now()
+        await setVerboseFlags(v)
+        const { loadVAEWGSL, vaeDecodeDiag } = await import('./vae-wgsl.js?v=' + v)
         println('loading VAE (99 MB)…')
         await loadVAEWGSL((msg, frac) => println(`  [${(frac * 100).toFixed(0)}%] ${msg}`))
         println('running diag on random latent [1,4,64,64]…')

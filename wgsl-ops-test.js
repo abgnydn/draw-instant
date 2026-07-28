@@ -5,7 +5,7 @@
 
 import {
   unary, binary, softmax, instanceNorm, matmul, conv2d,
-  layerNorm, gemm, resizeNearest,
+  layerNorm, gemm, resizeNearest, powScalar,
   createStorage, createOutput, createUniform, readBack,
 } from './wgsl-ops.js'
 
@@ -13,6 +13,7 @@ function maxAbsDiff(a, b) {
   let m = 0
   for (let i = 0; i < a.length; i++) {
     const d = Math.abs(a[i] - b[i])
+    if (Number.isNaN(d)) return Infinity
     if (d > m) m = d
   }
   return m
@@ -178,6 +179,55 @@ export async function runOpsTests(device, onLog = console.log) {
     await runOne(device, enc)
     const got = await readBack(device, Ybuf, M * N * 4)
     check('matmul 32x48x24', got, ref, 1e-3)
+    Abuf.destroy(); Bbuf.destroy(); Ybuf.destroy(); cfg.destroy()
+  }
+
+  // --- Batched MatMul: rank-3 A × shared B (cfg.w=0, dispatch z=batch) ---
+  onLog('[wgsl-ops] batched matmul')
+  {
+    const Bt = 2, M = 20, N = 24, K = 12
+    const A = new Float32Array(Bt * M * K), B = new Float32Array(K * N)
+    for (let i = 0; i < A.length; i++) A[i] = Math.sin(i * 0.21)
+    for (let i = 0; i < B.length; i++) B[i] = Math.cos(i * 0.13)
+    const ref = new Float32Array(Bt * M * N)
+    for (let b = 0; b < Bt; b++) for (let r = 0; r < M; r++) for (let c = 0; c < N; c++) {
+      let s = 0
+      for (let k = 0; k < K; k++) s += A[(b * M + r) * K + k] * B[k * N + c]
+      ref[(b * M + r) * N + c] = s
+    }
+    const Abuf = createStorage(device, A)
+    const Bbuf = createStorage(device, B)
+    const Ybuf = createOutput(device, Bt * M * N * 4)
+    const cfg = createUniform(device, new Uint32Array([M, N, K, 0])) // shared B
+    const enc = device.createCommandEncoder()
+    matmul(device)(enc, Abuf, Bbuf, Ybuf, cfg, M, N, Bt)
+    await runOne(device, enc)
+    const got = await readBack(device, Ybuf, Bt * M * N * 4)
+    check('matmul batched sharedB', got, ref, 1e-3)
+    Abuf.destroy(); Bbuf.destroy(); Ybuf.destroy(); cfg.destroy()
+  }
+
+  // --- Batched MatMul: rank-3 A × rank-3 B (cfg.w=1) ---
+  {
+    const Bt = 2, M = 20, N = 24, K = 12
+    const A = new Float32Array(Bt * M * K), B = new Float32Array(Bt * K * N)
+    for (let i = 0; i < A.length; i++) A[i] = Math.sin(i * 0.21)
+    for (let i = 0; i < B.length; i++) B[i] = Math.cos(i * 0.13)
+    const ref = new Float32Array(Bt * M * N)
+    for (let b = 0; b < Bt; b++) for (let r = 0; r < M; r++) for (let c = 0; c < N; c++) {
+      let s = 0
+      for (let k = 0; k < K; k++) s += A[(b * M + r) * K + k] * B[(b * K + k) * N + c]
+      ref[(b * M + r) * N + c] = s
+    }
+    const Abuf = createStorage(device, A)
+    const Bbuf = createStorage(device, B)
+    const Ybuf = createOutput(device, Bt * M * N * 4)
+    const cfg = createUniform(device, new Uint32Array([M, N, K, 1])) // batched B
+    const enc = device.createCommandEncoder()
+    matmul(device)(enc, Abuf, Bbuf, Ybuf, cfg, M, N, Bt)
+    await runOne(device, enc)
+    const got = await readBack(device, Ybuf, Bt * M * N * 4)
+    check('matmul batched batchedB', got, ref, 1e-3)
     Abuf.destroy(); Bbuf.destroy(); Ybuf.destroy(); cfg.destroy()
   }
 
@@ -350,12 +400,37 @@ export async function runOpsTests(device, onLog = console.log) {
     }
     const Xbuf = createStorage(device, X)
     const Ybuf = createOutput(device, C * H_out * W_out * 4)
-    const cfg = createUniform(device, new Uint32Array([C, H_in, W_in, H_out]))
+    const numel = C * H_out * W_out
+    const cfg = createUniform(device, new Uint32Array([C, H_in, W_in, H_out, W_out, numel, 0, 0]))
     const enc = device.createCommandEncoder()
-    resizeNearest(device)(enc, Xbuf, Ybuf, cfg, C, H_out, W_out)
+    resizeNearest(device)(enc, Xbuf, Ybuf, cfg, numel)
     await runOne(device, enc)
     const got = await readBack(device, Ybuf, C * H_out * W_out * 4)
     check('resize nearest 2x', got, ref, 1e-5)
+    Xbuf.destroy(); Ybuf.destroy(); cfg.destroy()
+  }
+
+  // --- powScalar: negative bases must stay sign-aware for integer exponents ---
+  onLog('[wgsl-ops] powScalar')
+  for (const e of [2, 3, 0.5]) {
+    const N = 256
+    const X = new Float32Array(N)
+    for (let i = 0; i < N; i++) X[i] = (i - N / 2) / (N / 8) // ~[-4, 4], half negative
+    const ref = new Float32Array(N)
+    for (let i = 0; i < N; i++) {
+      const x = X[i]
+      // Kernel contract: x<0 with non-integer e → 0 (undefined in real pow).
+      if (x < 0 && !Number.isInteger(e)) ref[i] = 0
+      else ref[i] = Math.pow(x, e)
+    }
+    const Xbuf = createStorage(device, X)
+    const Ybuf = createOutput(device, N * 4)
+    const cfg = createUniform(device, new Float32Array([e, 0, 0, 0]))
+    const enc = device.createCommandEncoder()
+    powScalar(device)(enc, Xbuf, Ybuf, cfg, N)
+    await runOne(device, enc)
+    const got = await readBack(device, Ybuf, N * 4)
+    check(`powScalar e=${e}`, got, ref, 1e-3)
     Xbuf.destroy(); Ybuf.destroy(); cfg.destroy()
   }
 

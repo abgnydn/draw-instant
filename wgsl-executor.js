@@ -43,11 +43,12 @@ function dwarn(...a) { console.warn('[wgsl]', ...a) }
 // ---------- Tensor descriptor: GPU buffer + shape + dtype ----------
 
 export class Tensor {
-  constructor({ buf, dims, dtype = 'float32', consumers = 0 }) {
+  constructor({ buf, dims, dtype = 'float32', consumers = 0, cpuData = null }) {
     this.buf = buf
     this.dims = dims
     this.dtype = dtype
     this.consumers = consumers  // how many downstream nodes still need this
+    if (cpuData) this.cpuData = cpuData  // CPU mirror for scalar fast-paths (Pow exponent, Resize scales)
     this.numel = dims.reduce((a, b) => a * b, 1)
     this.byteLength = this.numel * 4
   }
@@ -132,9 +133,11 @@ OPS.Reshape = (ctx, node, [x, shape]) => {
   const raw = shape?.cpuData ? Array.from(shape.cpuData).map(Number) : (x.dims || []).slice()
   const newDims = raw.slice()
   const xNumel = (x.dims || []).reduce((a, b) => a * b, 1)
+  for (let i = 0; i < newDims.length; i++) {
+    if (newDims[i] === 0) newDims[i] = x.dims[i]  // allowzero=0: copy from input
+  }
   const knownProduct = newDims.reduce((a, b) => b > 0 ? a * b : a, 1)
   for (let i = 0; i < newDims.length; i++) {
-    if (newDims[i] === 0) newDims[i] = x.dims[i]
     if (newDims[i] === -1) newDims[i] = xNumel / knownProduct
   }
   return passthroughWithDims(x, newDims)
@@ -232,8 +235,20 @@ OPS.Constant = (ctx, node, _inputs) => {
 OPS.ConstantOfShape = (ctx, node, [shapeT]) => {
   const dims = Array.from(shapeT.cpuData).map(Number)
   const numel = dims.reduce((a, b) => a * b, 1) || 0
+  // Fill value from the `value` attr (one-element TensorProto), default 0.
+  // Recycled pool buffers hold stale bytes — must write explicitly.
+  const vAttr = node.attributes.find(a => a.name === 'value')
+  let fill = 0
+  if (vAttr?.t?.data?.byteLength) {
+    const t = vAttr.t
+    if (t.dtype === 'float32') fill = new Float32Array(t.data.buffer.slice(t.data.byteOffset, t.data.byteOffset + 4))[0]
+    else if (t.dtype === 'int64') fill = Number(new BigInt64Array(t.data.buffer.slice(t.data.byteOffset, t.data.byteOffset + 8))[0])
+    else if (t.dtype === 'int32') fill = new Int32Array(t.data.buffer.slice(t.data.byteOffset, t.data.byteOffset + 4))[0]
+    else if (t.dtype === 'float16') fill = ctx.f16BytesToF32(new Uint8Array(t.data.buffer, t.data.byteOffset, 2))[0]
+  }
   const buf = ctx.pool.acquire(Math.max(numel * 4, 4))
-  // Fill value default = 0 (ONNX spec). For now we trust pool buffers are zero.
+  const arr = new Float32Array(Math.max(numel, 1)).fill(fill)
+  ctx.device.queue.writeBuffer(buf, 0, arr.buffer, 0, arr.byteLength)
   return new Tensor({ buf, dims })
 }
 
@@ -350,8 +365,7 @@ OPS.Gather = (ctx, node, [data, indices]) => {
     const out = new BigInt64Array(idx.map(i => data.cpuData[i] ?? 0n))
     return { isShape: true, cpuData: out, dims: indices.dims?.slice() || [], dtype: 'int64' }
   }
-  // GPU gather not yet implemented — fall through as passthrough.
-  return new Tensor({ buf: data.buf, dims: data.dims.slice() })
+  throw new Error(`Gather ${node.name}: GPU-tensor path not implemented`)
 }
 
 // --- Transpose: real ND permute via copy kernel (up to 4D). ---
@@ -492,14 +506,38 @@ OPS.Pow = (ctx, node, [a, b]) => {
   throw new Error(`Pow: non-scalar exponent not yet supported (b.dims=${b?.dims})`)
 }
 
-// --- Expand / Equal / Where stubs (rare ops) ---
+// --- Expand / Equal / Where: CPU shape-path only; unsupported cases throw ---
 OPS.Expand = (ctx, node, [x, shape]) => {
-  // Read target dims from shape tensor if present.
   const newDims = shape?.cpuData ? Array.from(shape.cpuData).map(Number) : (x.dims || []).slice()
+  const newNumel = newDims.reduce((a, b) => a * b, 1)
+  const xNumel = (x.dims || []).reduce((a, b) => a * b, 1)
+  if (newNumel !== xNumel) throw new Error(`Expand ${node.name}: real broadcast ${x.dims} → ${newDims} not implemented`)
   return passthroughWithDims(x, newDims)
 }
-OPS.Equal = (ctx, node, [a, b]) => passthroughWithDims(a, (a.dims || []).slice())
-OPS.Where = (ctx, node, [cond, a, b]) => passthroughWithDims(a, (a.dims || []).slice())
+OPS.Equal = (ctx, node, [a, b]) => {
+  const cpu = (t) => t && t.cpuData != null && !t.buf
+  if (cpu(a) && cpu(b)) {
+    const n = Math.max(a.cpuData.length, b.cpuData.length)
+    const out = new Uint8Array(n)
+    for (let i = 0; i < n; i++) out[i] = Number(a.cpuData[a.cpuData.length === 1 ? 0 : i]) === Number(b.cpuData[b.cpuData.length === 1 ? 0 : i]) ? 1 : 0
+    return { isShape: true, cpuData: out, dims: (a.cpuData.length >= b.cpuData.length ? a.dims : b.dims)?.slice() || [n], dtype: 'bool' }
+  }
+  throw new Error(`Equal ${node.name}: GPU path not implemented`)
+}
+OPS.Where = (ctx, node, [cond, a, b]) => {
+  const cpu = (t) => t && t.cpuData != null && !t.buf
+  if (cpu(cond) && cpu(a) && cpu(b)) {
+    const n = Math.max(cond.cpuData.length, a.cpuData.length, b.cpuData.length)
+    const Ctor = a.cpuData.length >= b.cpuData.length ? a.cpuData.constructor : b.cpuData.constructor
+    const out = new Ctor(n)
+    for (let i = 0; i < n; i++) {
+      const c = Number(cond.cpuData[cond.cpuData.length === 1 ? 0 : i])
+      out[i] = c ? a.cpuData[a.cpuData.length === 1 ? 0 : i] : b.cpuData[b.cpuData.length === 1 ? 0 : i]
+    }
+    return { isShape: a.isShape !== false || b.isShape !== false, cpuData: out, dims: [n], dtype: a.dtype || b.dtype || 'int64' }
+  }
+  throw new Error(`Where ${node.name}: GPU path not implemented`)
+}
 
 // --- elementwise binary ---
 const BIN_FN = {
@@ -921,6 +959,7 @@ OPS.InstanceNormalization = (ctx, node, [x, gamma, beta]) => {
 OPS.Softmax = (ctx, node, [x]) => {
   const axis = getAttrInt(node, 'axis', -1)
   const ax = axis < 0 ? x.dims.length + axis : axis
+  if (ax !== x.dims.length - 1) throw new Error(`Softmax: only last-axis supported, got axis=${axis} dims=${x.dims}`)
   const innerLen = x.dims[ax]
   const rows = x.numel / innerLen
   const outBuf = ctx.pool.acquire(x.byteLength)
@@ -929,16 +968,20 @@ OPS.Softmax = (ctx, node, [x]) => {
   return new Tensor({ buf: outBuf, dims: x.dims.slice() })
 }
 
-// --- MatMul ---
+// --- MatMul (batched via 3D grid; cfg.w = "B is batched" flag) ---
 OPS.MatMul = (ctx, node, [a, b]) => {
   const M = a.dims[a.dims.length - 2]
   const K = a.dims[a.dims.length - 1]
   const N = b.dims[b.dims.length - 1]
+  const batch = a.dims.slice(0, -2).reduce((x, y) => x * y, 1)
+  const bBatch = b.dims.slice(0, -2).reduce((x, y) => x * y, 1)
+  if (bBatch !== 1 && bBatch !== batch) throw new Error(`MatMul: batch mismatch a=${a.dims} b=${b.dims}`)
+  if (batch === 1 && bBatch > 1) throw new Error(`MatMul: batched B with unbatched A not supported`)
   const outDims = [...a.dims.slice(0, -2), M, N]
-  const outBuf = ctx.pool.acquire(M * N * 4)
-  const cfg = createUniform(ctx.device, new Uint32Array([M, N, K, 0]))
-  if (LOG.verbose) dlog(`  MatMul M=${M} N=${N} K=${K} aDims=${a.dims} bDims=${b.dims}`)
-  ctx.dispatchers.matmul(ctx.encoder, a.buf, b.buf, outBuf, cfg, M, N)
+  const outBuf = ctx.pool.acquire(batch * M * N * 4)
+  const cfg = createUniform(ctx.device, new Uint32Array([M, N, K, bBatch > 1 ? 1 : 0]))
+  if (LOG.verbose) dlog(`  MatMul B=${batch} M=${M} N=${N} K=${K} aDims=${a.dims} bDims=${b.dims}`)
+  ctx.dispatchers.matmul(ctx.encoder, a.buf, b.buf, outBuf, cfg, M, N, batch)
   return new Tensor({ buf: outBuf, dims: outDims })
 }
 
@@ -968,6 +1011,7 @@ OPS.Conv = (ctx, node, [x, w, bias]) => {
   }
   const PAD = pads[0]
   const [N, C_in, H, W] = x.dims
+  if (N !== 1) throw new Error(`Conv: batch N=${N} not supported (kernel computes batch 0 only)`)
   const C_out = w.dims[0]
   const H_out = Math.floor((H + 2 * PAD - K) / S) + 1
   const W_out = Math.floor((W + 2 * PAD - K) / S) + 1

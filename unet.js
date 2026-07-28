@@ -7,16 +7,16 @@
 // calls so the swap-in is a one-file change.
 //
 // Model source: schmuell/sd-turbo-ort-web (Microsoft / ORT team hosted).
-//   unet/model.onnx         ~1.73 GB   (fp16 UNet)
+//   unet/model.onnx         ~1.73 GB   (fp16 weights, f32 graph I/O)
 //   vae_decoder/model.onnx  ~99 MB     (used by v3)
 //
 // The UNet signature (from the ONNX graph metadata):
 //   inputs:
-//     sample           [B, 4, 64, 64]   fp16   — noisy latent at current step
+//     sample           [B, 4, 64, 64]   f32    — noisy latent at current step
 //     timestep         [1]              int64  — current step's training timestep
-//     encoder_hidden_states [B, 77, 1024] fp16 — cross-attn context (CLIP embeds)
+//     encoder_hidden_states [B, 77, 1024] f32  — cross-attn context (CLIP embeds)
 //   output:
-//     out_sample       [B, 4, 64, 64]   fp16   — predicted noise (epsilon)
+//     out_sample       [B, 4, 64, 64]   f32    — predicted noise (epsilon)
 //
 // SD-Turbo uses CFG-less inference (g=0), so B=1 is fine. We keep the API
 // compatible with CFG (pass both uncond + cond concatenated along batch) so v4
@@ -32,6 +32,18 @@ let _unet = null
 // ---- Download helper with progress ----
 
 async function fetchWithProgress(url, onProgress = () => {}) {
+  // HF's no-store redirect mints a fresh signed CDN URL per request, so the
+  // HTTP cache never hits — persist the bytes in the Cache API instead.
+  let cache = null
+  try { cache = await caches.open('draw-instant-models') } catch (e) { /* Cache API unavailable */ }
+  if (cache) {
+    const hit = await cache.match(url)
+    if (hit) {
+      const buf = await hit.arrayBuffer()
+      onProgress(buf.byteLength, buf.byteLength)
+      return buf
+    }
+  }
   const res = await fetch(url, { cache: 'force-cache' })
   if (!res.ok) throw new Error(`fetch ${url} → ${res.status}`)
   const total = Number(res.headers.get('content-length')) || 0
@@ -53,6 +65,7 @@ async function fetchWithProgress(url, onProgress = () => {}) {
   const buf = new Uint8Array(received)
   let o = 0
   for (const c of chunks) { buf.set(c, o); o += c.byteLength }
+  if (cache) { try { await cache.put(url, new Response(buf)) } catch (e) { /* quota exceeded — degrade to re-download */ } }
   return buf.buffer
 }
 
@@ -89,8 +102,8 @@ export function getUNet() { return _unet }
 
 // ---- One denoise step ----
 //
-// Accepts CPU Float32 tensors, internally converts to fp16 for the ORT fp16
-// graph, returns CPU Float32 noise prediction.
+// Accepts CPU Float32 tensors and feeds them as-is — the graph I/O is f32
+// (weights are fp16 internally). Returns CPU Float32 noise prediction.
 
 function f32ToF16(f32) {
   // Bit-level fp32 → fp16 conversion (IEEE-754 binary16).
@@ -102,6 +115,7 @@ function f32ToF16(f32) {
     const sign = (x >>> 16) & 0x8000
     let mant = x & 0x007fffff
     let exp = ((x >>> 23) & 0xff) - 127 + 15
+    if (((x >>> 23) & 0xff) === 0xff && mant !== 0) { out[i] = sign | 0x7e00; continue } // NaN → quiet NaN, not Inf
     if (exp <= 0) {
       // subnormal / zero
       if (exp < -10) { out[i] = sign; continue }
