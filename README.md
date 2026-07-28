@@ -6,7 +6,7 @@ colorTo: yellow
 sdk: static
 pinned: false
 license: mit
-short_description: Realtime as-you-type Stable Diffusion, 100% in-browser on WebGPU
+short_description: As-you-type Stable Diffusion, in-browser on WebGPU
 ---
 
 <div align="center">
