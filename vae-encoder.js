@@ -139,15 +139,23 @@ export async function vaeEncode(image, { B = 1, H = 512, W = 512 } = {}) {
 
   // schmuell vae_encoder graph I/O is fp16 (unlike the fp32-I/O unet and
   // vae_decoder in the same bundle — verified from the ONNX graphs).
+  // ORT demands a native Float16Array for fp16 feeds where the engine has one
+  // (Chrome 135+); engines without it take the raw uint16 bit pattern.
   const feeds = {}
   const img32 = image instanceof Float32Array ? image : new Float32Array(image)
-  feeds[_enc.inputNames[0]] = new ort.Tensor('float16', f32ToF16(img32), [B, 3, H, W])
+  const f16 = typeof Float16Array !== 'undefined' ? new Float16Array(img32) : f32ToF16(img32)
+  feeds[_enc.inputNames[0]] = new ort.Tensor('float16', f16, [B, 3, H, W])
 
   const t0 = performance.now()
   const out = await _enc.session.run(feeds)
   const encodeMs = performance.now() - t0
   const tensor = out[_enc.outputNames[0]]
-  const raw = tensor.data instanceof Float32Array ? tensor.data : f16ToF32(tensor.data)
+  // Output mirrors the input: native Float16Array converts numerically;
+  // a Uint16Array carries raw fp16 bits and needs the manual decode.
+  const d = tensor.data
+  const raw = d instanceof Float32Array ? d
+    : (typeof Float16Array !== 'undefined' && d instanceof Float16Array) ? Float32Array.from(d)
+    : f16ToF32(d)
 
   // Apply scaling factor so the latent matches the denoise-loop distribution.
   const latent = new Float32Array(raw.length)
