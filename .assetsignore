@@ -16,3 +16,4 @@ package.json
 LICENSE
 .gitignore
 .assetsignore
+.wrangler/
