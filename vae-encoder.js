@@ -1,12 +1,12 @@
 // draw.instant — v5 VAE encoder (ORT path) → image to latent for img2img
 //
-// Input  : image  [1, 3, 512, 512] f32 in [-1, 1] (we convert from fp16 as needed)
+// Input  : image  [1, 3, 512, 512] f32 in [-1, 1] (graph I/O is fp16; we convert both ways)
 // Output : latent [1, 4, 64, 64]   f32, already multiplied by SCALING_FACTOR
 //
 // The schmuell bundle ships vae_encoder/model.onnx alongside the decoder we
-// already use. Output is the posterior mean (no sampling — we skip the std
-// for determinism at the cost of a tiny amount of noise injection, which is
-// fine because img2img explicitly adds noise on top anyway).
+// already use. The graph samples the posterior internally (RandomNormalLike is
+// baked into the export), so encoding the same frame twice yields slightly
+// different latents — fine because img2img adds noise on top anyway.
 
 import { getORT, createSession } from './ort.js'
 
@@ -19,6 +19,18 @@ let _enc = null
 function mb(n) { return (n / 1024 / 1024).toFixed(0) }
 
 async function fetchWithProgress(url, onProgress = () => {}) {
+  // HF's no-store redirect mints a fresh signed CDN URL per request, so the
+  // HTTP cache never hits — persist the bytes in the Cache API instead.
+  let cache = null
+  try { cache = await caches.open('draw-instant-models') } catch (e) { /* Cache API unavailable */ }
+  if (cache) {
+    const hit = await cache.match(url)
+    if (hit) {
+      const buf = await hit.arrayBuffer()
+      onProgress(buf.byteLength, buf.byteLength)
+      return buf
+    }
+  }
   const res = await fetch(url, { cache: 'force-cache' })
   if (!res.ok) throw new Error(`fetch ${url} → ${res.status}`)
   const total = Number(res.headers.get('content-length')) || 0
@@ -40,6 +52,7 @@ async function fetchWithProgress(url, onProgress = () => {}) {
   const out = new Uint8Array(received)
   let o = 0
   for (const c of chunks) { out.set(c, o); o += c.byteLength }
+  if (cache) { try { await cache.put(url, new Response(out)) } catch (e) { /* quota exceeded — degrade to re-download */ } }
   return out.buffer
 }
 
@@ -53,6 +66,7 @@ function f32ToF16(f32) {
     const sign = (x >>> 16) & 0x8000
     let mant = x & 0x007fffff
     let exp = ((x >>> 23) & 0xff) - 127 + 15
+    if (((x >>> 23) & 0xff) === 0xff && mant !== 0) { out[i] = sign | 0x7e00; continue } // NaN → quiet NaN, not Inf
     if (exp <= 0) {
       if (exp < -10) { out[i] = sign; continue }
       mant = (mant | 0x00800000) >> (1 - exp)
@@ -123,9 +137,11 @@ export async function vaeEncode(image, { B = 1, H = 512, W = 512 } = {}) {
   const ort = getORT()
   if (!_enc) throw new Error('VAE encoder not loaded')
 
-  // VAE encoder here is float32 (matches decoder bundle).
+  // schmuell vae_encoder graph I/O is fp16 (unlike the fp32-I/O unet and
+  // vae_decoder in the same bundle — verified from the ONNX graphs).
   const feeds = {}
-  feeds[_enc.inputNames[0]] = new ort.Tensor('float32', image instanceof Float32Array ? image : new Float32Array(image), [B, 3, H, W])
+  const img32 = image instanceof Float32Array ? image : new Float32Array(image)
+  feeds[_enc.inputNames[0]] = new ort.Tensor('float16', f32ToF16(img32), [B, 3, H, W])
 
   const t0 = performance.now()
   const out = await _enc.session.run(feeds)

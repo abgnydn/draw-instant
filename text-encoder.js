@@ -16,8 +16,8 @@
 // tokenizer is the same BPE used by OpenCLIP-H at the token-id level for the
 // standard 49408-entry vocab, and it already produces 77-token ids. (This
 // matters: the SD-Turbo text encoder was fine-tuned from the OpenCLIP-H base
-// and uses an identical tokenizer vocabulary. If token mismatch ever shows up
-// we'd swap in the tokenizer.json from the schmuell repo too.)
+// and uses an identical tokenizer vocabulary. One known mismatch: the pad
+// token id (49407 vs 0) — corrected in encodeSDPrompt below.)
 
 import { getORT, createSession } from './ort.js'
 
@@ -29,6 +29,18 @@ let _te = null
 function mb(n) { return (n / 1024 / 1024).toFixed(0) }
 
 async function fetchWithProgress(url, onProgress = () => {}) {
+  // HF's no-store redirect mints a fresh signed CDN URL per request, so the
+  // HTTP cache never hits — persist the bytes in the Cache API instead.
+  let cache = null
+  try { cache = await caches.open('draw-instant-models') } catch (e) { /* Cache API unavailable */ }
+  if (cache) {
+    const hit = await cache.match(url)
+    if (hit) {
+      const buf = await hit.arrayBuffer()
+      onProgress(buf.byteLength, buf.byteLength)
+      return buf
+    }
+  }
   const res = await fetch(url, { cache: 'force-cache' })
   if (!res.ok) throw new Error(`fetch ${url} → ${res.status}`)
   const total = Number(res.headers.get('content-length')) || 0
@@ -50,6 +62,7 @@ async function fetchWithProgress(url, onProgress = () => {}) {
   const out = new Uint8Array(received)
   let o = 0
   for (const c of chunks) { out.set(c, o); o += c.byteLength }
+  if (cache) { try { await cache.put(url, new Response(out)) } catch (e) { /* quota exceeded — degrade to re-download */ } }
   return out.buffer
 }
 
@@ -104,6 +117,13 @@ export async function encodeSDPrompt(text, tokenizer) {
   const idsSrc = await tokOut.input_ids.data
   const ids = new Int32Array(77)
   for (let i = 0; i < 77; i++) ids[i] = Number(idsSrc[i])
+
+  // SD-Turbo (SD2/OpenCLIP-H tokenizer) pads with id 0 ('!'), not 49407.
+  // The Xenova CLIP-base tokenizer pads with 49407 (eos); keep the first eos,
+  // rewrite the trailing pad run to 0 (same effect as the official ORT
+  // sd-turbo demo's `tokenizer.pad_token_id = 0`).
+  const eos = ids.indexOf(49407)
+  if (eos !== -1) ids.fill(0, eos + 1)
 
   const t0 = performance.now()
   const inputName = _te.inputNames[0]

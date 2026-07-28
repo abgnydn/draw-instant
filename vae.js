@@ -1,16 +1,16 @@
 // draw.instant — v3 VAE decoder (ORT path) → first pixels on canvas
 //
-// Input  : latent [1, 4, 64, 64] (f32 in our layout; converts to fp16 for the ORT fp16 graph)
+// Input  : latent [1, 4, 64, 64] f32 (graph I/O is f32; weights are fp16 internally)
 // Output : image  [1, 3, 512, 512] in roughly [-1, 1] range
 //
 // SD-Turbo's VAE uses the same scaling_factor = 0.18215 as SD 1.x/2.x. We
 // divide the latent by this before decoding so the VAE sees values in its
 // trained distribution.
 //
-// URL: schmuell/sd-turbo-ort-web/vae_decoder/model.onnx  (~99 MB fp16)
+// URL: schmuell/sd-turbo-ort-web/vae_decoder/model.onnx  (~99 MB, fp16 weights)
 // Signature (from ONNX graph):
-//   input   latent_sample  [B, 4, 64, 64]   fp16
-//   output  sample         [B, 3, 512, 512] fp16
+//   input   latent_sample  [B, 4, 64, 64]   f32
+//   output  sample         [B, 3, 512, 512] f32
 
 import { getORT, createSession } from './ort.js'
 
@@ -23,6 +23,18 @@ let _vae = null
 function mb(n) { return (n / 1024 / 1024).toFixed(0) }
 
 async function fetchWithProgress(url, onProgress = () => {}) {
+  // HF's no-store redirect mints a fresh signed CDN URL per request, so the
+  // HTTP cache never hits — persist the bytes in the Cache API instead.
+  let cache = null
+  try { cache = await caches.open('draw-instant-models') } catch (e) { /* Cache API unavailable */ }
+  if (cache) {
+    const hit = await cache.match(url)
+    if (hit) {
+      const buf = await hit.arrayBuffer()
+      onProgress(buf.byteLength, buf.byteLength)
+      return buf
+    }
+  }
   const res = await fetch(url, { cache: 'force-cache' })
   if (!res.ok) throw new Error(`fetch ${url} → ${res.status}`)
   const total = Number(res.headers.get('content-length')) || 0
@@ -44,6 +56,7 @@ async function fetchWithProgress(url, onProgress = () => {}) {
   const out = new Uint8Array(received)
   let o = 0
   for (const c of chunks) { out.set(c, o); o += c.byteLength }
+  if (cache) { try { await cache.put(url, new Response(out)) } catch (e) { /* quota exceeded — degrade to re-download */ } }
   return out.buffer
 }
 
@@ -59,6 +72,7 @@ function f32ToF16(f32) {
     const sign = (x >>> 16) & 0x8000
     let mant = x & 0x007fffff
     let exp = ((x >>> 23) & 0xff) - 127 + 15
+    if (((x >>> 23) & 0xff) === 0xff && mant !== 0) { out[i] = sign | 0x7e00; continue } // NaN → quiet NaN, not Inf
     if (exp <= 0) {
       if (exp < -10) { out[i] = sign; continue }
       mant = (mant | 0x00800000) >> (1 - exp)
