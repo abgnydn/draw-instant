@@ -13,7 +13,8 @@
 // linear1, silu, linear2) can run inside one workgroup since every
 // intermediate has ≤1280 elements, fitting comfortably in workgroup memory.
 //
-// Bench: naive = 4 dispatches vs fused = 1.
+// Bench: naive = 3 dispatches (SiLU folds into Linear_1's epilogue even in
+// the naive path) vs fused = 1.
 
 const WARMUP = 5
 const RUNS = 50
@@ -21,7 +22,7 @@ const FREQ_DIM = 160
 const EMB_DIM  = FREQ_DIM * 2   // 320
 const HID_DIM  = 1280
 
-// -------- naive WGSL (4 dispatches) --------
+// -------- naive WGSL (3 dispatches) --------
 
 const WGSL_SINEMB = () => `
 @group(0) @binding(0) var<storage, read>       T   : array<f32>;
@@ -131,6 +132,7 @@ fn main(@builtin(local_invocation_id) lid : vec3<u32>) {
 
 async function makeDevice() {
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' })
+  if (!adapter) throw new Error('no adapter')
   const device = await adapter.requestDevice()
   return { device }
 }

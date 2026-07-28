@@ -6,6 +6,11 @@
 //   h = conv2(silu(GN2(h)))
 //   y = h + skip                     (skip = x when C_in == C_out)
 //
+// Omitted vs diffusers ResnetBlock2D: the timestep-embedding injection
+// (h += time_emb_proj(silu(temb)), broadcast between conv1 and GN2). This
+// bench covers only the GN/SiLU/conv/skip chain, so a real block is one
+// broadcast-add heavier than the dispatch counts below.
+//
 // This bundles v2.5.0 (GroupNorm) and v2.5.1 (Conv2d 3×3) end-to-end, so it's
 // the first milestone where fusion savings compound across multiple ops.
 //
@@ -411,10 +416,11 @@ export async function runResNetBench(onProgress = () => {}) {
   const tflopsNaive = flops / (naive / 1000) / 1e12
   const tflopsFused = flops / (fused / 1000) / 1e12
 
-  // Traffic reclaimed (rough): GN's scratch stats eliminated ×2, SiLU in-place
-  // passes eliminated ×2 (each re-reads + re-writes full N_IO), residual add
-  // folded into conv epilogue (saves reading Y + writing Y). ≈ 5× N_IO bytes.
-  const bytesSaved = 5 * N_IO * 4
+  // Traffic reclaimed (rough): two SiLU in-place passes eliminated (each
+  // re-reads + re-writes full N_IO → 4× N_IO), residual add folded into
+  // conv2's epilogue (saves reading Y + writing Y → 2× N_IO). GN's stats
+  // scratch (B·G·2 floats ×2) is negligible. Total ≈ 6× N_IO bytes.
+  const bytesSaved = 6 * N_IO * 4
 
   return {
     shape: SHAPE,

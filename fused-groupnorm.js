@@ -335,6 +335,9 @@ export async function runGroupNormBench(onProgress = () => {}) {
   onProgress('correctness check…')
   runNaive(); runFused()
   await waitGpu(device)
+  // Spot-check only: the first 4096 elements are channels 0-15, all inside
+  // group 0 of 32 — the fused kernel's base/channel offsets for g >= 1 (and,
+  // with identity gamma/beta above, the scale/bias mapping) go unverified.
   const [yn, yf] = await Promise.all([
     readBack(device, bYN, Math.min(N, 4096)),
     readBack(device, bYF, Math.min(N, 4096)),

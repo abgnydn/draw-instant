@@ -22,19 +22,20 @@
 //   13. h3 = h2 @ W2
 //   14. y  = x1 + h3                       (residual 2)
 //
-// Fused (7 dispatches):
+// Fused (9 dispatches):
 //   1. LN1                                  (row stats need full reduction)
-//   2. fused-QKV combined matmul           (Q, K, V into adjacent regions of one buffer)
-//   3. flash-attention                      (single dispatch, v1.1 kernel)
-//   4. out-proj + residual 1               (matmul with residual epilogue)
-//   5. LN2
-//   6. FFN-up with GELU epilogue
-//   7. FFN-down with residual-2 epilogue
+//   2-4. Q, K, V matmuls                    (still 3 separate — a packed [D, 3D]
+//                                            fused-QKV matmul is future v1.3)
+//   5. flash-attention                      (single dispatch, v1.1 kernel)
+//   6. out-proj + residual 1               (matmul with residual epilogue)
+//   7. LN2
+//   8. FFN-up with GELU epilogue
+//   9. FFN-down with residual-2 epilogue
 //
 // Same arithmetic both paths, same output to within float tolerance. Delta is
 // dispatch count + intermediate re-reads skipped. The "3 dispatches" aspiration
 // in the roadmap would require fusing across matmul→matmul boundaries which is
-// blocked by the full-row reductions LayerNorm and softmax need. 14→7 is what
+// blocked by the full-row reductions LayerNorm and softmax need. 14→9 is what
 // the math actually permits without changing the kernel quality.
 
 const WG = 16

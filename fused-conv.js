@@ -1,8 +1,10 @@
 // draw.instant — v2.5.1 fused Conv2d 3×3 (our own WGSL, no framework)
 //
 // Conv2d is the dominant op in the SD U-Net by FLOPs. Every ResNet block has
-// two 3×3 convs, and the classic fusion target is Conv + SiLU + residual-add
-// (the block output). We can't fuse GroupNorm across a conv (GN needs a
+// two 3×3 convs. The Conv + SiLU + residual-add epilogue benched here is a
+// synthetic stress case: in SD's ResNet block SiLU runs BEFORE each conv and
+// the block exit is conv2 + skip with no activation (fused-resnet.js models
+// the real sequence). We can't fuse GroupNorm across a conv (GN needs a
 // full-row reduction over the conv's output, which blocks matmul→GN fusion),
 // but Conv + bias + SiLU + residual all live in the conv's epilogue where
 // the output value is computed once and never re-read.
@@ -19,7 +21,8 @@
 //
 // Shape: SD-Turbo mid-block feature map, [B=1, C=1280, H=16, W=16],
 // kernel=3×3, stride=1, padding=1. C_in = C_out = 1280. Weight size
-// 1280·1280·3·3·4 ≈ 59 MB (f32). FLOPs per conv ≈ 3.77 G.
+// 1280·1280·3·3·4 ≈ 59 MB (f32). MACs per conv ≈ 3.77 G = 7.55 GFLOP at the
+// 2-FLOPs-per-MAC convention the TFLOPS metric below uses.
 
 const WARMUP = 3
 const RUNS = 10
@@ -279,9 +282,10 @@ export async function runConvBench(onProgress = () => {}) {
   const tflopsNaive = flops / (naive / 1000) / 1e12
   const tflopsFused = flops / (fused / 1000) / 1e12
 
-  // Bandwidth reclaimed: naive writes Y, reads Y (silu), writes Y, reads Y (add), writes Y.
-  // Fused writes Y once. Extra traffic skipped ≈ 2× Y bytes.
-  const bytesSaved = 2 * N_IO * 4
+  // Bandwidth reclaimed: naive writes Y, reads Y (silu), writes Y, reads Y (add),
+  // writes Y — 5 accesses vs 1 fused write, so 2 re-reads + 2 re-writes skipped
+  // ≈ 4× Y bytes.
+  const bytesSaved = 4 * N_IO * 4
 
   return {
     shape: SHAPE,

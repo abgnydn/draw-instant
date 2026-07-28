@@ -81,7 +81,11 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 // Pass 2: softmax along last dim. One workgroup per (b, h, i); 256 threads
 // cooperatively compute max → exp → sum → normalise. Scores layout
 // [B, H, S, S], with softmax over the inner S.
-const WGSL_SOFTMAX = (B, H, S) => `
+const WGSL_SOFTMAX = (B, H, S) => {
+  // One thread per score below — S > 256 would silently drop scores 256..S-1
+  // from the max/sum, so fail loudly instead.
+  if (S > 256) throw new Error(`WGSL_SOFTMAX: S=${S} > 256 not supported`)
+  return `
 @group(0) @binding(0) var<storage, read_write> scores : array<f32>;
 
 const B_ : u32 = ${B}u;
@@ -100,7 +104,7 @@ fn main(
   let t = lid.x;
   let row_base = row * S_;
 
-  // Each thread handles ceil(S/256) scores. With S=256, 1 each.
+  // One score per thread (S <= 256, enforced in JS above).
   // Find row max (parallel reduce).
   var my_max : f32 = -3.4e38;
   if (t < S_) { my_max = scores[row_base + t]; }
@@ -136,6 +140,7 @@ fn main(
   if (t < S_) { scores[row_base + t] = scores[row_base + t] * inv; }
 }
 `
+}
 
 // Pass 3: out[b, s=i, h, t] = Σ_j probs[b, h, i, j] * V[b, s=j, h, t]
 const WGSL_ATTN_OUT = (B, H, S, HEAD_DIM) => `
@@ -186,10 +191,10 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 //   5) write out[b, s=i, h, t] = acc
 //
 // Storage (S=256, HEAD_DIM=64):
-//   scores[S]       = 1 KB
-//   q_row[HEAD_DIM] = 256 B
-//   sh_buf[256]     = 1 KB (for reductions)
-//   total ≈ 2.3 KB, far under the 32 KB Apple workgroup storage limit.
+//   scores[S]        = 1 KB
+//   q_row[HEAD_DIM]  = 256 B
+//   sh_buf[HEAD_DIM] = 256 B (for reductions across the 64 threads)
+//   total ≈ 1.5 KB, far under the 32 KB Apple workgroup storage limit.
 const WGSL_FUSED_ATTN = (B, H, S, HEAD_DIM, scale) => `
 @group(0) @binding(0) var<storage, read>       Q   : array<f32>;
 @group(0) @binding(1) var<storage, read>       K   : array<f32>;

@@ -12,9 +12,10 @@
 //   probs  = softmax(scores, S_kv) [B, H, S_q, S_kv]
 //   out    = probs @ V             [B, H, S_q, head]
 //
-// FUSED (1 dispatch, flash-attention-style):
-//   One workgroup per (b, h, q_tile). Accumulate numerator+denominator over
-//   S_kv in a running-max softmax; scores never materialize to global memory.
+// FUSED (1 dispatch):
+//   One workgroup per (b, h, q). S_kv=77 is small enough that the full score
+//   vector lives in workgroup memory and is softmaxed there in one shot;
+//   scores never materialize to global memory.
 
 const WARMUP = 3
 const RUNS = 10
@@ -102,11 +103,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 `
 
-// -------- WGSL fused flash cross-attn --------
-//
-// One workgroup per (b, h, q). 128 threads collaborate over the S_kv axis.
-// Streaming softmax: track running max m and sum l, rescale output when m
-// updates. Output accumulator of size D=64 is kept in workgroup memory.
+// -------- WGSL fused cross-attn --------
 
 // Fused cross-attention: S_kv is small (=77) so we compute the full scores
 // vector into workgroup memory (fits in <1 KB), softmax it there, then each
@@ -276,8 +273,7 @@ export async function runCrossAttnBench(onProgress = () => {}) {
     device.queue.submit([enc.finish()])
   }
 
-  // Softmax-dispatch geometry: we want one workgroup per (q, bh). Fix it.
-  // (The naive setup above is fine because x-dim handles q, y-dim bh.)
+  // Naive softmax geometry: one thread per (q, bh) row — x covers q, y covers bh.
 
   onProgress('correctness check…')
   runNaive(); runFused()
