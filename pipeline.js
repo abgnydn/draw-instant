@@ -49,8 +49,6 @@ const ui = {
   stepsVal: $('steps-val'),
   seedEl: $('seed'),
   seedVal: $('seed-val'),
-  guidanceEl: $('guidance'),
-  guidanceVal: $('guidance-val'),
   resolutionEl: $('resolution'),
   go: $('generate'),
   mStep: $('m-step'),
@@ -135,7 +133,7 @@ async function loadPipeline(_caps) {
 }
 
 async function generate(_params) {
-  // Params: { prompt, steps, seed, guidance }
+  // Params: { prompt, steps, seed }
   // Returns: { imageData, msPerStep, msTotal, dispatchesPerStep }
   throw new Error('generate() not implemented in v0 — baseline lands in v0.1')
 }
@@ -150,7 +148,6 @@ function bindSliders() {
   }
   sync(ui.stepsEl, ui.stepsVal)
   sync(ui.seedEl, ui.seedVal)
-  sync(ui.guidanceEl, ui.guidanceVal, (v) => Number(v).toFixed(1))
 }
 
 function setStatus(msg, live = false) {
@@ -854,6 +851,10 @@ async function onGoLive() {
     ui.promptEl.addEventListener('input', scheduleLiveDenoise)
     ui.seedEl.addEventListener('input', scheduleLiveDenoise)
     ui.stepsEl.addEventListener('input', scheduleLiveDenoise)
+    // Switching resolution re-renders immediately. The first render at a new
+    // latent shape pays a one-time ORT pipeline compile (warmup only covers
+    // 64×64), so expect a stutter on the first 256² frame.
+    ui.resolutionEl.addEventListener('change', scheduleLiveDenoise)
 
     ui.go.textContent = 'Generate now'
     ui.go.disabled = false

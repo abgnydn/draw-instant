@@ -268,11 +268,10 @@
             <span class="val" id="seed-val">42</span>
           </div>
 
-          <div class="slider-row">
-            <label class="lbl" for="guidance">Guidance</label>
-            <input type="range" id="guidance" min="0" max="8" step="0.1" value="1.0" />
-            <span class="val" id="guidance-val">1.0</span>
-          </div>
+          <p class="mono" style="color: var(--muted); font-size: 11px; margin: 0; letter-spacing: 0.04em;">
+            No guidance control — SD-Turbo is distilled to run guidance-free, and CFG would
+            double the U-Net cost per step.
+          </p>
 
           <div class="slider-row">
             <label class="lbl" for="resolution">Resolution</label>
