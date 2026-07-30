@@ -27,8 +27,31 @@ can't masquerade as a win.
 ## Methodology
 
 - **Warm-up discarded.** The elementwise probe runs a separate 5-iteration
-  warm-up, then times 25 runs and reports the median (`bench.js`: `RUNS = 25`).
-  Block benchmarks warm the pipeline before timing.
+  warm-up before timing. Block benchmarks warm the pipeline before timing.
+- **Timing method — the fence is measured out, not amortized.** The obvious way
+  to time GPU work is to submit one iteration and `await
+  queue.onSubmittedWorkDone()`. That measures the fence as much as the work.
+  Instead we submit a batch of N iterations, fence **once**, repeat at 2N, and
+  take the slope:
+
+  ```
+  per_iteration = ( t(2N) − t(N) ) / N
+  ```
+
+  The fixed fence cost appears in both terms and cancels exactly. This is not a
+  micro-optimisation: the fence costs well under a millisecond in Chrome/Dawn
+  but **~13 ms under Deno/wgpu**, so a per-iteration fence floors every
+  sub-millisecond measurement at ~13 ms and reports fused and naive as
+  identical no matter what the kernels do. Before this fix the same probe on the
+  same GPU read 0.60/0.30 ms in Chrome and 13.48/13.47 ms under Deno; after it,
+  both runtimes agree on ~0.10 ms naive. Cross-runtime comparison — which is the
+  entire point of the headless discrete-GPU path — is only valid with the fence
+  removed.
+- **Wall clock, not `timestamp-query`.** A GPU-side timer would exclude CPU-side
+  dispatch overhead, which is exactly what the fusion thesis is about.
+- **The comparison target is measured the same way.** `bench-torch.py` uses the
+  identical batch-slope method. Timing our path fence-free against a
+  fence-inclusive PyTorch number would manufacture a win.
 - **Nothing extraneous inside the timed window.** Bind groups are created once,
   outside the timed loops — the timed region contains dispatches, not
   descriptor churn. (An earlier version created them per-iteration, 6:1 against
@@ -75,7 +98,7 @@ so its per-block delta compounds across the denoise loop.
 |---|---:|---:|---:|---|
 | FFN | 66.7 ms | 66.1 ms | 1.01× | 0 max abs diff |
 | Full transformer block | 28.6 ms | 28.3 ms | 1.01× | 8.0e-7 max abs diff |
-| Elementwise probe | 0.60 ms | 0.30 ms | 2.0× | readback diff at boot |
+| Elementwise probe | 0.10 ms | 0.03 ms | 3.2× | readback diff at boot |
 
 Supporting numbers: CLIP text encode ~60–90 ms; VAE graph is 525 nodes / 140
 tensors / ~99 MB.
@@ -90,9 +113,11 @@ blocks.** This is expected and it does **not** contradict the thesis:
 - The block benchmarks are **compute-bound** on M2 at these shapes, so
   collapsing dispatches doesn't move the wall clock.
 - The **elementwise probe is the exception**: at sub-millisecond scale it is
-  launch-bound even on M2, and 6 → 1 dispatches shows ~2×. (An earlier 2.67×
-  figure was inflated by a diagnostic monkey-patch and per-iteration bind-group
-  creation inside the timed window; 2.0× is the unbiased number.)
+  launch-bound even on M2, and 6 → 1 dispatches shows ~3×. (Two earlier figures
+  were wrong: 2.67× was inflated by a diagnostic monkey-patch and per-iteration
+  bind-group creation inside the timed window, and 2.0× still fenced once per
+  iteration — see *Timing method* above. 3.2× is the number with the fence
+  removed from the measurement.)
 
 The win lives on **discrete GPUs**, where kernel-launch overhead dominates the
 sequential denoising loop. Discrete-GPU per-step numbers are the next data
@@ -101,22 +126,29 @@ precedent) until they're measured from this repo.
 
 ## PyTorch head-to-head (`bench-torch.py`)
 
-Same op chain as the boot probe, same methodology (separate 5-run warm-up,
-25 timed runs, median, device-fenced), same machine. Eager PyTorch is the
-analogue of the naive path: one kernel launch per op, every intermediate
-materialized to memory.
+Same op chain as the boot probe, same batch-slope timing method, same machine.
+Eager PyTorch is the analogue of the naive path: one kernel launch per op, every
+intermediate materialized to memory.
 
 | path | Apple M2 (ms) |
 | --- | --- |
-| fused WGSL (browser probe) | **0.30** |
-| PyTorch eager, MPS | 0.35 |
-| naive WGSL, 6 dispatches | 0.60 |
-| PyTorch eager, CPU | 1.41 |
+| fused WGSL (browser probe) | **0.03** |
+| naive WGSL, 6 dispatches | 0.10 |
+| PyTorch eager, MPS | 0.10 |
+| PyTorch eager, CPU | 1.01 |
 
-On Apple unified memory, eager MPS is already efficient — fused-vs-torch is
-~1.2× here, not a blowout; the naive WGSL path loses to torch outright.
-Reproduce on your hardware: `uv run bench-torch.py` (PEP 723 pulls torch),
-then compare against the fused/naive ms the page prints on the same machine.
+The useful signal here is the agreement, not the win: **eager MPS and our naive
+path land on the same 0.10 ms.** Two independent implementations of "six
+separate kernel launches" measuring identically is the strongest evidence we
+have that the instrument is sound. Against that baseline the fused path is
+~3× — one dispatch instead of six, same arithmetic.
+
+Reproduce on your hardware: `uv run bench-torch.py` (PEP 723 pulls torch), then
+compare against the fused/naive ms the page prints on the same machine.
+
+An earlier version of this table read 0.30 / 0.60 / 0.35 / 1.41 and concluded
+~1.2×. Those numbers fenced once per iteration on both sides, so most of what
+they measured was synchronisation. They have been retired.
 
 ---
 

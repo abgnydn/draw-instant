@@ -16,7 +16,9 @@
 // isolates the thing we care about: dispatch count vs. identical arithmetic.
 
 const N_ELEMENTS = 1 << 20 // 1M elements, ~4MB per f32 buffer
-const RUNS = 25            // timed runs (a separate 5-run warm-up precedes timing)
+const RUNS = 100           // iterations per timed batch (a 2× batch pairs with it)
+const REPEATS = 5          // batch pairs; the median across them is reported
+const WARMUP = 5           // untimed runs before measuring
 const WORKGROUP = 256
 
 const WGSL_NAIVE_STEP = (op) => `
@@ -211,33 +213,46 @@ export async function runFusionProbe(onProgress = () => {}) {
   let maxAbsDiff = 0
   for (let i = 0; i < nCheck; i++) { const d = Math.abs(outNaive[i] - outFused[i]); if (d > maxAbsDiff) maxAbsDiff = d }
 
-  // Warm-up + timed runs. We use CPU-side wall clock with queue.onSubmittedWorkDone
-  // as the sync barrier — timestamp-query isn't universal across devices yet and
-  // for a 25-sample median the wall-clock noise is fine for relative comparison.
+  // Warm-up + timed runs.
+  //
+  // Method: submit a batch of N iterations and fence ONCE, then repeat at 2N and
+  // take the slope — per_iter = (t(2N) − t(N)) / N. The fence
+  // (queue.onSubmittedWorkDone) has a fixed cost, and the subtraction cancels it
+  // exactly. This is not cosmetic: in Chrome/Dawn the fence is sub-millisecond,
+  // but under Deno/wgpu it costs ~13 ms, so fencing once per iteration floors
+  // every measurement at ~13 ms and makes naive and fused look identical
+  // regardless of the workload.
+  //
+  // Wall clock, not timestamp-query, is deliberate: CPU-side dispatch overhead is
+  // precisely what this probe measures, and a GPU-side timer would exclude it.
   onProgress('warming up…')
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < WARMUP; i++) {
     await runNaiveChain(device, pipelines, naiveBGs, dispatches)
     await runFused(device, pipelines.fused, fusedBG, dispatches)
   }
   await waitForGpu(device)
 
-  onProgress('measuring naive (6 dispatches / chain)…')
-  const naiveMs = []
-  for (let i = 0; i < RUNS; i++) {
+  const timeBatch = async (run, count) => {
     const t0 = performance.now()
-    await runNaiveChain(device, pipelines, naiveBGs, dispatches)
+    for (let i = 0; i < count; i++) await run()
     await waitForGpu(device)
-    naiveMs.push(performance.now() - t0)
+    return performance.now() - t0
+  }
+  const measure = async (run) => {
+    const samples = []
+    for (let r = 0; r < REPEATS; r++) {
+      const tN = await timeBatch(run, RUNS)
+      const t2N = await timeBatch(run, RUNS * 2)
+      samples.push((t2N - tN) / RUNS)
+    }
+    return samples
   }
 
+  onProgress('measuring naive (6 dispatches / chain)…')
+  const naiveMs = await measure(() => runNaiveChain(device, pipelines, naiveBGs, dispatches))
+
   onProgress('measuring fused (1 dispatch / chain)…')
-  const fusedMs = []
-  for (let i = 0; i < RUNS; i++) {
-    const t0 = performance.now()
-    await runFused(device, pipelines.fused, fusedBG, dispatches)
-    await waitForGpu(device)
-    fusedMs.push(performance.now() - t0)
-  }
+  const fusedMs = await measure(() => runFused(device, pipelines.fused, fusedBG, dispatches))
 
   // Clean up.
   for (const buf of Object.values(buffers)) buf.destroy()

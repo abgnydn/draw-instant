@@ -22,7 +22,8 @@ import torch
 
 N = 1 << 20
 WARMUP = 5
-RUNS = 25
+RUNS = 100      # iterations per timed batch (a 2x batch pairs with it)
+REPEATS = 5     # batch pairs; the median across them is reported
 
 
 def chain(a, b):
@@ -41,20 +42,32 @@ def sync(device):
         torch.cuda.synchronize()
 
 
+def time_batch(device, a, b, count):
+    sync(device)
+    t0 = time.perf_counter()
+    for _ in range(count):
+        chain(a, b)
+    sync(device)
+    return (time.perf_counter() - t0) * 1000
+
+
 def bench(device):
+    # Same method as bench.js: submit a batch of N and sync ONCE, repeat at 2N,
+    # take the slope. per_iter = (t(2N) - t(N)) / N cancels the fixed sync cost
+    # exactly. Syncing once per iteration (the obvious way) measures the sync,
+    # not the work — and torch must be measured the same way as the WGSL path
+    # or the comparison is meaningless.
     a = torch.rand(N, dtype=torch.float32, device=device) * 2 - 1
     b = torch.rand(N, dtype=torch.float32, device=device) * 2 - 1
     for _ in range(WARMUP):
         chain(a, b)
     sync(device)
-    times = []
-    for _ in range(RUNS):
-        sync(device)
-        t0 = time.perf_counter()
-        chain(a, b)
-        sync(device)
-        times.append((time.perf_counter() - t0) * 1000)
-    return statistics.median(times)
+    samples = []
+    for _ in range(REPEATS):
+        t_n = time_batch(device, a, b, RUNS)
+        t_2n = time_batch(device, a, b, RUNS * 2)
+        samples.append((t_2n - t_n) / RUNS)
+    return statistics.median(samples)
 
 
 if torch.backends.mps.is_available():
