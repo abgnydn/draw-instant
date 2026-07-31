@@ -23,8 +23,9 @@
 // Correctness check: output must match naive to within float tolerance (order
 // of summation differs, so expect ~1e-4 max abs diff, not zero).
 
+import { measureSamples } from './bench-timing.js'
+
 const WARMUP = 5
-const RUNS = 20
 const EPS = 1e-5
 
 // SD-Turbo mid-block feature-map GroupNorm shape.
@@ -355,23 +356,11 @@ export async function runGroupNormBench(onProgress = () => {}) {
   for (let i = 0; i < WARMUP; i++) { runNaive(); runFused() }
   await waitGpu(device)
 
-  onProgress(`timing naive (2 dispatches × ${RUNS} runs)…`)
-  const naiveMs = []
-  for (let i = 0; i < RUNS; i++) {
-    const t0 = performance.now()
-    runNaive()
-    await waitGpu(device)
-    naiveMs.push(performance.now() - t0)
-  }
+  onProgress(`timing naive (2 dispatches)…`)
+  const naiveMs = await measureSamples(device, runNaive)
 
-  onProgress(`timing fused (1 dispatch × ${RUNS} runs)…`)
-  const fusedMs = []
-  for (let i = 0; i < RUNS; i++) {
-    const t0 = performance.now()
-    runFused()
-    await waitGpu(device)
-    fusedMs.push(performance.now() - t0)
-  }
+  onProgress(`timing fused (1 dispatch)…`)
+  const fusedMs = await measureSamples(device, runFused)
 
   for (const b of [bX, bStats, bGamma, bBeta, bYN, bYF]) b.destroy()
   device.destroy()

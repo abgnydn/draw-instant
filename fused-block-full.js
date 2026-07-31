@@ -38,9 +38,10 @@
 // blocked by the full-row reductions LayerNorm and softmax need. 14→9 is what
 // the math actually permits without changing the kernel quality.
 
+import { measureSamples } from './bench-timing.js'
+
 const WG = 16
 const WARMUP = 3
-const RUNS = 10
 
 // SD-Turbo mid-block transformer shape. Self-attention at 16×16 spatial latent.
 //   tokens per batch = 256, d-model = 1280, FFN expansion = 4× = 5120.
@@ -648,23 +649,11 @@ export async function runBlockBench(onProgress = () => {}) {
   for (let i = 0; i < WARMUP; i++) { runNaive(); runFused() }
   await waitGpu(device)
 
-  onProgress(`timing naive (14 dispatches × ${RUNS} runs)…`)
-  const naiveMs = []
-  for (let i = 0; i < RUNS; i++) {
-    const t0 = performance.now()
-    runNaive()
-    await waitGpu(device)
-    naiveMs.push(performance.now() - t0)
-  }
+  onProgress(`timing naive (14 dispatches)…`)
+  const naiveMs = await measureSamples(device, runNaive)
 
-  onProgress(`timing fused (9 dispatches × ${RUNS} runs)…`)
-  const fusedMs = []
-  for (let i = 0; i < RUNS; i++) {
-    const t0 = performance.now()
-    runFused()
-    await waitGpu(device)
-    fusedMs.push(performance.now() - t0)
-  }
+  onProgress(`timing fused (9 dispatches)…`)
+  const fusedMs = await measureSamples(device, runFused)
 
   for (const b of [
     bX, bXln, bQ, bK, bV, bSc, bAttn, bProj, bX1N, bX1F, bX1lnN, bX1lnF,

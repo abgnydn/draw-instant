@@ -15,9 +15,9 @@
 // On a real U-Net this shape is boring compared to attention+FFN chains, but it
 // isolates the thing we care about: dispatch count vs. identical arithmetic.
 
+import { measureSamples } from './bench-timing.js'
+
 const N_ELEMENTS = 1 << 20 // 1M elements, ~4MB per f32 buffer
-const RUNS = 100           // iterations per timed batch (a 2× batch pairs with it)
-const REPEATS = 5          // batch pairs; the median across them is reported
 const WARMUP = 5           // untimed runs before measuring
 const WORKGROUP = 256
 
@@ -232,27 +232,11 @@ export async function runFusionProbe(onProgress = () => {}) {
   }
   await waitForGpu(device)
 
-  const timeBatch = async (run, count) => {
-    const t0 = performance.now()
-    for (let i = 0; i < count; i++) await run()
-    await waitForGpu(device)
-    return performance.now() - t0
-  }
-  const measure = async (run) => {
-    const samples = []
-    for (let r = 0; r < REPEATS; r++) {
-      const tN = await timeBatch(run, RUNS)
-      const t2N = await timeBatch(run, RUNS * 2)
-      samples.push((t2N - tN) / RUNS)
-    }
-    return samples
-  }
-
   onProgress('measuring naive (6 dispatches / chain)…')
-  const naiveMs = await measure(() => runNaiveChain(device, pipelines, naiveBGs, dispatches))
+  const naiveMs = await measureSamples(device, () => runNaiveChain(device, pipelines, naiveBGs, dispatches))
 
   onProgress('measuring fused (1 dispatch / chain)…')
-  const fusedMs = await measure(() => runFused(device, pipelines.fused, fusedBG, dispatches))
+  const fusedMs = await measureSamples(device, () => runFused(device, pipelines.fused, fusedBG, dispatches))
 
   // Clean up.
   for (const buf of Object.values(buffers)) buf.destroy()

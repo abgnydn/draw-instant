@@ -26,8 +26,9 @@
 // Correctness: both paths must produce the same output to within float
 // tolerance. Softmax-stability (max-subtract before exp) is identical in both.
 
+import { measureSamples } from './bench-timing.js'
+
 const WARMUP = 5
-const RUNS = 20
 
 // SD-Turbo mid-block self-attention at 16x16 latent spatial resolution.
 // Chosen so the scores matrix is measurable (~10 MB) but workgroup memory for
@@ -442,23 +443,11 @@ export async function runAttnBench(onProgress = () => {}) {
   for (let i = 0; i < WARMUP; i++) { runNaive(); runFused() }
   await waitGpu(device)
 
-  onProgress(`timing naive (3 dispatches × ${RUNS} runs)…`)
-  const naiveMs = []
-  for (let i = 0; i < RUNS; i++) {
-    const t0 = performance.now()
-    runNaive()
-    await waitGpu(device)
-    naiveMs.push(performance.now() - t0)
-  }
+  onProgress(`timing naive (3 dispatches)…`)
+  const naiveMs = await measureSamples(device, runNaive)
 
-  onProgress(`timing fused (1 dispatch × ${RUNS} runs)…`)
-  const fusedMs = []
-  for (let i = 0; i < RUNS; i++) {
-    const t0 = performance.now()
-    runFused()
-    await waitGpu(device)
-    fusedMs.push(performance.now() - t0)
-  }
+  onProgress(`timing fused (1 dispatch)…`)
+  const fusedMs = await measureSamples(device, runFused)
 
   for (const b of [bQ, bK, bV, bScores, bOutN, bOutF]) b.destroy()
   device.destroy()

@@ -16,8 +16,9 @@
 // Bench: naive = 3 dispatches (SiLU folds into Linear_1's epilogue even in
 // the naive path) vs fused = 1.
 
+import { measureSamples } from './bench-timing.js'
+
 const WARMUP = 5
-const RUNS = 50
 const FREQ_DIM = 160
 const EMB_DIM  = FREQ_DIM * 2   // 320
 const HID_DIM  = 1280
@@ -246,15 +247,9 @@ export async function runTEmbedBench(onProgress = () => {}) {
   for (let i = 0; i < WARMUP; i++) { runNaive(); runFused() }
   await waitGpu(device)
 
-  onProgress(`timing × ${RUNS}…`)
-  const naiveMs = []
-  for (let i = 0; i < RUNS; i++) {
-    const t0 = performance.now(); runNaive(); await waitGpu(device); naiveMs.push(performance.now() - t0)
-  }
-  const fusedMs = []
-  for (let i = 0; i < RUNS; i++) {
-    const t0 = performance.now(); runFused(); await waitGpu(device); fusedMs.push(performance.now() - t0)
-  }
+  onProgress(`timing…`)
+  const naiveMs = await measureSamples(device, runNaive)
+  const fusedMs = await measureSamples(device, runFused)
 
   for (const b of [bT, bW1, bB1, bW2, bB2, bE, bHid, bYN, bYF]) b.destroy()
   device.destroy()

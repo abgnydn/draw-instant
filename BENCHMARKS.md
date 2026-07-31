@@ -94,30 +94,66 @@ so its per-block delta compounds across the denoise loop.
 
 ## Results — Apple M2 (reference)
 
-| Block | Naive | Fused | Speedup | Correctness |
-|---|---:|---:|---:|---|
-| FFN | 66.7 ms | 66.1 ms | 1.01× | 0 max abs diff |
-| Full transformer block | 28.6 ms | 28.3 ms | 1.01× | 8.0e-7 max abs diff |
-| Elementwise probe | 0.10 ms | 0.03 ms | 3.2× | readback diff at boot |
+All nine, Apple M2 Max, both runtimes, identical batch-slope timing. Chrome
+(Dawn) is what users get; Deno (wgpu) is the headless path. **Each figure is the
+median of 3 full sweeps** — single runs vary too much to quote, especially on a
+thermally loaded GPU, and the individual runs are shown so you can see it.
+
+| Block | Chrome (Dawn) | runs | Deno (wgpu) | verdict |
+|---|---:|---|---:|---|
+| Elementwise probe | **3.36×** | 3.36 / 3.61 / 1.98 | 1.99× | win |
+| Conv 3×3 | 1.02× | 1.03 / 1.02 / 0.92 | 0.93× | wash |
+| FFN | 1.00× | 0.91 / 1.23 / 1.00 | 0.97× | wash |
+| ResNet | 0.99× | 1.04 / 0.99 / 0.96 | 1.02× | wash |
+| Full transformer block | 0.97× | 0.88 / 0.97 / 0.97 | 0.95× | wash |
+| Attention | 0.99× | 1.03 / 0.99 / 0.98 | **0.55×** | wash / runtime-dependent |
+| Group norm | 0.88× | 0.81 / 0.99 / 0.88 | 0.96× | wash |
+| Cross-attention | 0.87× | 0.86 / 0.92 / 0.87 | 0.56× | **loss** |
+| Timestep embed | 0.11× | 0.12 / 0.11 / 0.10 | 0.12× | **loss** |
+
+**Only the elementwise probe wins.** Everything else is a wash or a loss on this
+hardware. That is a harder result than previous versions of this document
+reported, and the difference is measurement, not kernels:
+
+- **Cross-attention was published as a 1.22× win. It is a ~0.87× loss** (0.56×
+  under wgpu). The "win" was the per-iteration fence adding a constant to both
+  paths, which flatters any ratio toward 1 and above.
+- **Attention was published as 1.05×; it is 0.99× on Dawn and 0.55× on wgpu.**
+  Anything said about this kernel has to name the runtime.
+- **The fused timestep embed loses ~9×** — 0.11× on Dawn, 0.12× on wgpu, tight
+  across every run. That one is real and reproducible.
+
+Absolute times moved too (FFN naive 66.7 → ~84 ms). Per-iteration fencing left
+the GPU idle between iterations and let it boost; a batched submission is
+sustained load, so clocks settle lower. Sustained is the honest model for a
+denoising loop, and both paths are measured identically either way.
 
 Supporting numbers: CLIP text encode ~60–90 ms; VAE graph is 525 nodes / 140
 tensors / ~99 MB.
 
 ### Reading these honestly
 
-On **Apple Silicon the fused path ties the naive path on the compute-bound
-blocks.** This is expected and it does **not** contradict the thesis:
+On **Apple Silicon only the elementwise probe wins; the rest tie or lose.**
+Taking that apart:
 
 - Apple's **unified memory** makes the global-memory round-trips that fusion
   removes nearly free. There's little launch/bandwidth overhead to eliminate.
 - The block benchmarks are **compute-bound** on M2 at these shapes, so
-  collapsing dispatches doesn't move the wall clock.
+  collapsing dispatches doesn't move the wall clock. FFN, ResNet, Conv and the
+  full block all sit within a few percent of 1.00×.
 - The **elementwise probe is the exception**: at sub-millisecond scale it is
-  launch-bound even on M2, and 6 → 1 dispatches shows ~3×. (Two earlier figures
-  were wrong: 2.67× was inflated by a diagnostic monkey-patch and per-iteration
-  bind-group creation inside the timed window, and 2.0× still fenced once per
-  iteration — see *Timing method* above. 3.2× is the number with the fence
-  removed from the measurement.)
+  launch-bound even on M2, and 6 → 1 dispatches shows ~3.4× on Dawn (~2.0× on
+  wgpu). It is also the noisiest entry in the table — individual runs ranged
+  1.98–3.61×. (Three earlier figures were wrong. 2.67× was inflated by a
+  diagnostic monkey-patch and per-iteration bind-group creation inside the timed
+  window. 2.0× removed those but still fenced once per iteration. See *Timing
+  method* above.)
+- **Two fused kernels are genuinely slower, and that is a kernel problem, not a
+  measurement one.** Timestep embed (0.11×) and cross-attention (0.87× Dawn /
+  0.56× wgpu) both concentrate work into too few workgroups, so they
+  under-occupy the GPU while the naive path spreads the same arithmetic across
+  it. Fusion removes memory traffic; it cannot remove the need to fill the
+  machine. These two are the clearest optimisation targets in the suite.
 
 The win lives on **discrete GPUs**, where kernel-launch overhead dominates the
 sequential denoising loop. Discrete-GPU per-step numbers are the next data

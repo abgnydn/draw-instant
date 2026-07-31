@@ -26,10 +26,11 @@
 // matmul-kernel-quality confound. The naive version has epilogue ops branched
 // off; the fused version does them inline in the matmul epilogue.
 
+import { measureSamples } from './bench-timing.js'
+
 const WG = 16                   // 16x16 tiled matmul workgroup
 const TILE = WG                 // tile size == workgroup size for simplicity
 const WARMUP = 5
-const RUNS = 20
 
 // SD Turbo-ish FFN block shape. Conservative defaults for Apple Silicon:
 // batch=2 (CFG: cond+uncond), seq=1024 (32x32 mid-block spatial), d=1280
@@ -303,23 +304,11 @@ export async function runFFNBench(onProgress = () => {}) {
   for (let i = 0; i < WARMUP; i++) { runNaive(); runFused() }
   await waitGpu(device)
 
-  onProgress(`timing naive (4 dispatches × ${RUNS} runs)…`)
-  const naiveMs = []
-  for (let i = 0; i < RUNS; i++) {
-    const t0 = performance.now()
-    runNaive()
-    await waitGpu(device)
-    naiveMs.push(performance.now() - t0)
-  }
+  onProgress(`timing naive (4 dispatches)…`)
+  const naiveMs = await measureSamples(device, runNaive)
 
-  onProgress(`timing fused (2 dispatches × ${RUNS} runs)…`)
-  const fusedMs = []
-  for (let i = 0; i < RUNS; i++) {
-    const t0 = performance.now()
-    runFused()
-    await waitGpu(device)
-    fusedMs.push(performance.now() - t0)
-  }
+  onProgress(`timing fused (2 dispatches)…`)
+  const fusedMs = await measureSamples(device, runFused)
 
   // Clean up.
   for (const b of [bX, bW1, bW2, bHidden, bOutN, bOutF]) b.destroy()
