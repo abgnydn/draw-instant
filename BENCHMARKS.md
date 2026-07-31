@@ -26,8 +26,9 @@ can't masquerade as a win.
 
 ## Methodology
 
-- **Warm-up discarded.** The elementwise probe runs a separate 5-iteration
-  warm-up before timing. Block benchmarks warm the pipeline before timing.
+- **Warm-up discarded.** Every bench spins both paths on a wall-clock budget
+  (~400 ms) before any timing, so the GPU is at a steady clock when measurement
+  starts.
 - **Timing method — the fence is measured out, not amortized.** The obvious way
   to time GPU work is to submit one iteration and `await
   queue.onSubmittedWorkDone()`. That measures the fence as much as the work.
@@ -49,6 +50,19 @@ can't masquerade as a win.
   removed.
 - **Wall clock, not `timestamp-query`.** A GPU-side timer would exclude CPU-side
   dispatch overhead, which is exactly what the fusion thesis is about.
+- **The two paths are interleaved, share one batch size, and run after a
+  wall-clock warm-up.** All three exist because the ratio is fragile. Measuring
+  all of naive and then all of fused lets any drift between the phases land in
+  the ratio; calibrating a separate N per path measures them under different
+  amounts of pipelining; and a fresh process on a cold GPU is erratic until the
+  power state settles (first three invocations on an M2 Max gave 33×, 5.0×, 7.7×
+  where the next three gave 4.08×, 4.21×, 4.42×).
+- **Know which numbers are stable.** Blocks with per-iteration work of a few ms
+  or more reproduce to within a few percent across runs. The sub-millisecond
+  elementwise probe does **not** — its absolute naive time drifts ~2× across
+  process invocations on an otherwise idle machine, so its ratio swings roughly
+  2–6×. Treat it as "clearly wins, magnitude unstable" and never quote a single
+  run of it. Run the suite several times and look at the spread.
 - **The comparison target is measured the same way.** `bench-torch.py` uses the
   identical batch-slope method. Timing our path fence-free against a
   fence-inclusive PyTorch number would manufacture a win.
@@ -95,13 +109,13 @@ so its per-block delta compounds across the denoise loop.
 ## Results — Apple M2 (reference)
 
 All nine, Apple M2 Max, both runtimes, identical batch-slope timing. Chrome
-(Dawn) is what users get; Deno (wgpu) is the headless path. **Each figure is the
-median of 3 full sweeps** — single runs vary too much to quote, especially on a
-thermally loaded GPU, and the individual runs are shown so you can see it.
+(Dawn) is what users get; Deno (wgpu) is the headless path. **Figures are medians
+across full sweeps**, with the individual runs shown — single runs vary too much
+to quote, and the probe varies too much even across sweeps.
 
 | Block | Chrome (Dawn) | runs | Deno (wgpu) | verdict |
 |---|---:|---|---:|---|
-| Elementwise probe | **3.36×** | 3.36 / 3.61 / 1.98 | 1.99× | win |
+| Elementwise probe | **~2–6×** | 1.98 / 3.36 / 3.61 / 6.3 / 6.6 | ~2–6× | win, magnitude unstable |
 | Conv 3×3 | 1.02× | 1.03 / 1.02 / 0.92 | 0.93× | wash |
 | FFN | 1.00× | 0.91 / 1.23 / 1.00 | 0.97× | wash |
 | ResNet | 0.99× | 1.04 / 0.99 / 0.96 | 1.02× | wash |
@@ -112,7 +126,8 @@ thermally loaded GPU, and the individual runs are shown so you can see it.
 | Timestep embed | 0.11× | 0.12 / 0.11 / 0.10 | 0.12× | **loss** |
 
 **Only the elementwise probe wins.** Everything else is a wash or a loss on this
-hardware. That is a harder result than previous versions of this document
+hardware. The probe's *magnitude* is not reproducible — see the stability note in
+*Methodology* — but its direction is: it wins on every run, by at least ~1.6×. That is a harder result than previous versions of this document
 reported, and the difference is measurement, not kernels:
 
 - **Cross-attention was published as a 1.22× win. It is a ~0.87× loss** (0.56×

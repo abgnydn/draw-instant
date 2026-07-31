@@ -38,7 +38,7 @@
 // blocked by the full-row reductions LayerNorm and softmax need. 14→9 is what
 // the math actually permits without changing the kernel quality.
 
-import { measureSamples } from './bench-timing.js'
+import { measurePair } from './bench-timing.js'
 
 const WG = 16
 const WARMUP = 3
@@ -649,11 +649,8 @@ export async function runBlockBench(onProgress = () => {}) {
   for (let i = 0; i < WARMUP; i++) { runNaive(); runFused() }
   await waitGpu(device)
 
-  onProgress(`timing naive (14 dispatches)…`)
-  const naiveMs = await measureSamples(device, runNaive)
-
-  onProgress(`timing fused (9 dispatches)…`)
-  const fusedMs = await measureSamples(device, runFused)
+  onProgress('timing naive vs fused (interleaved)…')
+  const { a: naiveMs, b: fusedMs } = await measurePair(device, runNaive, runFused)
 
   for (const b of [
     bX, bXln, bQ, bK, bV, bSc, bAttn, bProj, bX1N, bX1F, bX1lnN, bX1lnF,

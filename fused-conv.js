@@ -24,7 +24,7 @@
 // 1280·1280·3·3·4 ≈ 59 MB (f32). MACs per conv ≈ 3.77 G = 7.55 GFLOP at the
 // 2-FLOPs-per-MAC convention the TFLOPS metric below uses.
 
-import { measureSamples } from './bench-timing.js'
+import { measurePair } from './bench-timing.js'
 
 const WARMUP = 3
 
@@ -252,11 +252,8 @@ export async function runConvBench(onProgress = () => {}) {
   for (let i = 0; i < WARMUP; i++) { runNaive(); runFused() }
   await waitGpu(device)
 
-  onProgress(`timing naive (3 dispatches)…`)
-  const naiveMs = await measureSamples(device, runNaive)
-
-  onProgress(`timing fused (1 dispatch)…`)
-  const fusedMs = await measureSamples(device, runFused)
+  onProgress('timing naive vs fused (interleaved)…')
+  const { a: naiveMs, b: fusedMs } = await measurePair(device, runNaive, runFused)
 
   for (const b of [bX, bW, bB, bR, bYN, bYF]) b.destroy()
   device.destroy()

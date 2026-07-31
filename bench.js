@@ -15,7 +15,7 @@
 // On a real U-Net this shape is boring compared to attention+FFN chains, but it
 // isolates the thing we care about: dispatch count vs. identical arithmetic.
 
-import { measureSamples } from './bench-timing.js'
+import { measurePair } from './bench-timing.js'
 
 const N_ELEMENTS = 1 << 20 // 1M elements, ~4MB per f32 buffer
 const WARMUP = 5           // untimed runs before measuring
@@ -232,11 +232,12 @@ export async function runFusionProbe(onProgress = () => {}) {
   }
   await waitForGpu(device)
 
-  onProgress('measuring naive (6 dispatches / chain)…')
-  const naiveMs = await measureSamples(device, () => runNaiveChain(device, pipelines, naiveBGs, dispatches))
-
-  onProgress('measuring fused (1 dispatch / chain)…')
-  const fusedMs = await measureSamples(device, () => runFused(device, pipelines.fused, fusedBG, dispatches))
+  onProgress('measuring naive vs fused (interleaved)…')
+  const { a: naiveMs, b: fusedMs } = await measurePair(
+    device,
+    () => runNaiveChain(device, pipelines, naiveBGs, dispatches),
+    () => runFused(device, pipelines.fused, fusedBG, dispatches),
+  )
 
   // Clean up.
   for (const buf of Object.values(buffers)) buf.destroy()

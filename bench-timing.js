@@ -23,31 +23,68 @@
 const TARGET_BATCH_MS = 30   // aim each timed batch near this, so N adapts
 const MIN_N = 2
 const MAX_N = 200
-const REPEATS = 5            // batch pairs; caller takes the median
+const REPEATS = 7            // batch pairs per path; caller takes the median
+const WARM_MS = 400          // wall-clock warm-up to reach a steady GPU clock
 
-// Returns per-iteration milliseconds, one sample per repeat. The caller applies
-// its own median so existing bench code keeps working unchanged.
-export async function measureSamples(device, run, repeats = REPEATS) {
-  const timeBatch = async (count) => {
+// Measure two paths that will be divided into a ratio.
+//
+// Critically, the two are INTERLEAVED: one batch pair of A, then one of B, then
+// back to A. Measuring all of A and then all of B looks equivalent and is not —
+// any drift in machine state between the two phases (thermal, another process
+// touching memory, GPU clock changes) lands entirely in the ratio. That is not
+// hypothetical: measured sequentially, this probe's speedup ranged 1.9×–7.2× on
+// one machine within minutes, because the bandwidth-heavy naive path is far more
+// sensitive to memory-system contention than the small fused one. Interleaving
+// makes both paths share whatever conditions each moment happens to have.
+//
+// Returns { a, b } — per-iteration milliseconds, one sample per repeat.
+export async function measurePair(device, runA, runB, repeats = REPEATS) {
+  const timeBatch = async (run, count) => {
     const t0 = performance.now()
     for (let i = 0; i < count; i++) await run()
     await device.queue.onSubmittedWorkDone()
     return performance.now() - t0
   }
 
+  // Drive the GPU to a steady clock before measuring anything. A handful of
+  // warm-up iterations is not enough: on a cold device the first runs of a fresh
+  // process are erratic — measured on an M2 Max, the first three invocations
+  // gave 33×, 5.0× and 7.7× on this probe while the next three settled to
+  // 4.08×, 4.21×, 4.42×. That is power-state ramp, not kernels, so spin both
+  // paths on a wall-clock budget rather than an iteration count.
+  const warmUntil = performance.now() + WARM_MS
+  while (performance.now() < warmUntil) {
+    await runA()
+    await runB()
+    await device.queue.onSubmittedWorkDone()
+  }
+
   // Calibrate with a slope too — a single small batch would be dominated by the
   // fence and pick an N far too low. Precision doesn't matter here; we only need
   // the right order of magnitude to size the real batches.
-  const cal1 = await timeBatch(2)
-  const cal2 = await timeBatch(4)
-  const perIter = Math.max((cal2 - cal1) / 2, 1e-5)
-  const n = Math.max(MIN_N, Math.min(MAX_N, Math.round(TARGET_BATCH_MS / perIter)))
-
-  const samples = []
-  for (let r = 0; r < repeats; r++) {
-    const tN = await timeBatch(n)
-    const t2N = await timeBatch(n * 2)
-    samples.push((t2N - tN) / n)
+  const calibrate = async (run) => {
+    const c1 = await timeBatch(run, 2)
+    const c2 = await timeBatch(run, 4)
+    const perIter = Math.max((c2 - c1) / 2, 1e-5)
+    return Math.max(MIN_N, Math.min(MAX_N, Math.round(TARGET_BATCH_MS / perIter)))
   }
-  return samples
+  // ONE batch size for both paths, sized to the slower of the two. Calibrating
+  // each separately gives the cheaper path a larger N, so the two get measured
+  // under different amounts of pipelining — and that asymmetry lands straight in
+  // the ratio. Same N means the only difference between them is the kernels.
+  const n = Math.min(await calibrate(runA), await calibrate(runB))
+
+  const slope = async (run) => {
+    const tN = await timeBatch(run, n)
+    const t2N = await timeBatch(run, n * 2)
+    return (t2N - tN) / n
+  }
+
+  const a = []
+  const b = []
+  for (let r = 0; r < repeats; r++) {
+    a.push(await slope(runA))
+    b.push(await slope(runB))
+  }
+  return { a, b }
 }

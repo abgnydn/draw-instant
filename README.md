@@ -97,7 +97,7 @@ to quote:
 
 | Block | Chrome (Dawn) | Deno (wgpu) | Correctness |
 |---|---:|---:|---|
-| Elementwise probe (`bench.js`) | 🟢 **3.36×** | 1.99× | readback-verified at boot |
+| Elementwise probe (`bench.js`) | 🟢 **~2–6×** (unstable) | ~2–6× | readback-verified at boot |
 | Conv 3×3 (`fused-conv.js`) | 1.02× | 0.93× | 0.28 rel |
 | FFN (`fused-block.js`) | 1.00× | 0.97× | 0.61 rel |
 | ResNet (`fused-resnet.js`) | 0.99× | 1.02× | 9→4 dispatches |
@@ -114,8 +114,9 @@ to remove. The losses are a kernel problem, not a fusion one: timestep-embed and
 cross-attention concentrate work into too few workgroups and under-occupy the
 GPU, while the naive path spreads the same arithmetic across it. Fusion removes
 memory traffic; it can't remove the need to fill the machine. The tiny
-elementwise probe is the exception — launch-bound even on M2, 6 dispatches to 1
-shows **3.3×**. Full nine-block table, both runtimes, in
+elementwise probe is the exception — it wins on every run, but its magnitude
+swings ~2–6× because at sub-millisecond scale it's dominated by machine noise,
+so we quote a range rather than a figure. Full nine-block table, both runtimes, in
 [BENCHMARKS.md](./BENCHMARKS.md).
 
 🟢 **Discrete GPUs are the target.** Kernel-launch overhead dominates there.

@@ -26,7 +26,7 @@
 // matmul-kernel-quality confound. The naive version has epilogue ops branched
 // off; the fused version does them inline in the matmul epilogue.
 
-import { measureSamples } from './bench-timing.js'
+import { measurePair } from './bench-timing.js'
 
 const WG = 16                   // 16x16 tiled matmul workgroup
 const TILE = WG                 // tile size == workgroup size for simplicity
@@ -304,11 +304,8 @@ export async function runFFNBench(onProgress = () => {}) {
   for (let i = 0; i < WARMUP; i++) { runNaive(); runFused() }
   await waitGpu(device)
 
-  onProgress(`timing naive (4 dispatches)…`)
-  const naiveMs = await measureSamples(device, runNaive)
-
-  onProgress(`timing fused (2 dispatches)…`)
-  const fusedMs = await measureSamples(device, runFused)
+  onProgress('timing naive vs fused (interleaved)…')
+  const { a: naiveMs, b: fusedMs } = await measurePair(device, runNaive, runFused)
 
   // Clean up.
   for (const b of [bX, bW1, bW2, bHidden, bOutN, bOutF]) b.destroy()

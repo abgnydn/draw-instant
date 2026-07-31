@@ -26,7 +26,7 @@
 // Correctness: both paths must produce the same output to within float
 // tolerance. Softmax-stability (max-subtract before exp) is identical in both.
 
-import { measureSamples } from './bench-timing.js'
+import { measurePair } from './bench-timing.js'
 
 const WARMUP = 5
 
@@ -443,11 +443,8 @@ export async function runAttnBench(onProgress = () => {}) {
   for (let i = 0; i < WARMUP; i++) { runNaive(); runFused() }
   await waitGpu(device)
 
-  onProgress(`timing naive (3 dispatches)…`)
-  const naiveMs = await measureSamples(device, runNaive)
-
-  onProgress(`timing fused (1 dispatch)…`)
-  const fusedMs = await measureSamples(device, runFused)
+  onProgress('timing naive vs fused (interleaved)…')
+  const { a: naiveMs, b: fusedMs } = await measurePair(device, runNaive, runFused)
 
   for (const b of [bQ, bK, bV, bScores, bOutN, bOutF]) b.destroy()
   device.destroy()

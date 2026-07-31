@@ -37,7 +37,7 @@
 // Shape: SD-Turbo mid-block ResNet, [B=1, C=1280, H=16, W=16], G=32, k=3.
 // Weight memory: two 59 MB conv kernels.
 
-import { measureSamples } from './bench-timing.js'
+import { measurePair } from './bench-timing.js'
 
 const WARMUP = 3
 const EPS = 1e-5
@@ -383,11 +383,9 @@ export async function runResNetBench(onProgress = () => {}) {
   for (let i = 0; i < WARMUP; i++) { runNaive(); runFused() }
   await waitGpu(device)
 
-  onProgress(`timing naive (9 dispatches)…`)
-  const naiveMs = await measureSamples(device, runNaive)
+  onProgress('timing naive vs fused (interleaved)…')
+  const { a: naiveMs, b: fusedMs } = await measurePair(device, runNaive, runFused)
 
-  onProgress(`timing fused (4 dispatches)…`)
-  const fusedMs = await measureSamples(device, runFused)
 
   for (const b of [bX, bG1, bBt1, bG2, bBt2, bW1, bBi1, bW2, bBi2,
                    bStatsN1, bStatsN2, bH1N, bH2N, bH3N, bYN,

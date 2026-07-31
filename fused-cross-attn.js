@@ -17,7 +17,7 @@
 //   vector lives in workgroup memory and is softmaxed there in one shot;
 //   scores never materialize to global memory.
 
-import { measureSamples } from './bench-timing.js'
+import { measurePair } from './bench-timing.js'
 
 const WARMUP = 3
 
@@ -295,10 +295,8 @@ export async function runCrossAttnBench(onProgress = () => {}) {
   for (let i = 0; i < WARMUP; i++) { runNaive(); runFused() }
   await waitGpu(device)
 
-  onProgress(`timing naive…`)
-  const naiveMs = await measureSamples(device, runNaive)
-  onProgress(`timing fused…`)
-  const fusedMs = await measureSamples(device, runFused)
+  onProgress('timing naive vs fused (interleaved)…')
+  const { a: naiveMs, b: fusedMs } = await measurePair(device, runNaive, runFused)
 
   for (const b of [bQ, bK, bV, bS, bON, bOF]) b.destroy()
   device.destroy()

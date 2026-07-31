@@ -23,7 +23,7 @@
 // Correctness check: output must match naive to within float tolerance (order
 // of summation differs, so expect ~1e-4 max abs diff, not zero).
 
-import { measureSamples } from './bench-timing.js'
+import { measurePair } from './bench-timing.js'
 
 const WARMUP = 5
 const EPS = 1e-5
@@ -356,11 +356,8 @@ export async function runGroupNormBench(onProgress = () => {}) {
   for (let i = 0; i < WARMUP; i++) { runNaive(); runFused() }
   await waitGpu(device)
 
-  onProgress(`timing naive (2 dispatches)…`)
-  const naiveMs = await measureSamples(device, runNaive)
-
-  onProgress(`timing fused (1 dispatch)…`)
-  const fusedMs = await measureSamples(device, runFused)
+  onProgress('timing naive vs fused (interleaved)…')
+  const { a: naiveMs, b: fusedMs } = await measurePair(device, runNaive, runFused)
 
   for (const b of [bX, bStats, bGamma, bBeta, bYN, bYF]) b.destroy()
   device.destroy()
