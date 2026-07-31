@@ -194,10 +194,23 @@ Matmul at SD-Turbo shapes, Apple M2 Max:
 | `[1024×1280] × [1280×5120]` | 202 GFLOP/s | ~900 GFLOP/s | 4.5× |
 | `[256×640] × [640×640]` | 252 GFLOP/s | ~650 GFLOP/s | 2.6× |
 
+Conv (implicit im2col, the same kernel shape) at SD-Turbo shapes:
+
+| conv | before | after | gain |
+|---|---:|---:|---:|
+| 3×3 mid-block `C=1280 16×16` | 154 GFLOP/s (49.0 ms) | ~780 GFLOP/s (9.7 ms) | 5.1× |
+| 3×3 up-block `C=640 32×32` | 158 GFLOP/s (47.7 ms) | ~850 GFLOP/s (8.9 ms) | 5.3× |
+| 1×1 proj `C=1280 16×16` | 200 GFLOP/s (4.19 ms) | ~810 GFLOP/s (1.04 ms) | 4.0× |
+
+Conv matters most of the three: it runs **~34× per U-Net forward pass**, so it
+dominates the WGSL path far more than matmul does.
+
 "before" gave each thread a single output, so every fused-multiply-add needed two
 shared-memory reads — the kernel was bound by shared traffic rather than
 arithmetic. "after" blocks 4×4 outputs per thread over a 64×64 workgroup tile,
-amortising each pair of loads across 16 FMAs.
+amortising each pair of loads across 16 FMAs. For conv it pays twice, since the
+im2col gather costs index arithmetic per element and is now spread over 4× the
+outputs.
 
 Worth being clear about what this is and isn't: it changes **no** naive-vs-fused
 ratio, because both paths in those benches use their own matmuls. It moves the

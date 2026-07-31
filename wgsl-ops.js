@@ -602,8 +602,12 @@ struct ConvMmCfg {
 @group(0) @binding(3) var<storage, read_write> Y    : array<f32>;
 @group(0) @binding(4) var<uniform>             cfg  : ConvMmCfg;
 
-var<workgroup> tileA : array<f32, 256>;
-var<workgroup> tileB : array<f32, 256>;
+// Same 64x64 / 4x4 register blocking as WGSL_MATMUL — this is that matmul with
+// an im2col gather in place of a straight load of B. Blocking helps twice here:
+// each pair of shared reads feeds 16 FMAs, and the gather (which costs index
+// arithmetic per element, not just a load) is amortised over 4x the outputs.
+var<workgroup> tileA : array<f32, 1024>; // 64 oc  x 16 k
+var<workgroup> tileB : array<f32, 1024>; // 16 k   x 64 col
 
 @compute @workgroup_size(16, 16)
 fn main(
@@ -622,37 +626,74 @@ fn main(
   let W_out = cfg.W_out;
   let N     = H_out * W_out;
   let K_dim = C_in * K_sq;
-  let oc  = wg.y * 16u + lid.y;
-  let col = wg.x * 16u + lid.x;
-  let oy  = col / W_out;
-  let ox  = col % W_out;
-  var acc : f32 = 0.0;
+
+  let bOc  = wg.y * 64u;
+  let bCol = wg.x * 64u;
+  let tid  = lid.y * 16u + lid.x;
+
+  var acc : array<vec4<f32>, 4>;
+  acc[0] = vec4<f32>(0.0);
+  acc[1] = vec4<f32>(0.0);
+  acc[2] = vec4<f32>(0.0);
+  acc[3] = vec4<f32>(0.0);
+
   let tiles = (K_dim + 15u) / 16u;
   for (var t : u32 = 0u; t < tiles; t = t + 1u) {
-    let kA = t * 16u + lid.x;
-    let kB = t * 16u + lid.y;
-    tileA[lid.y * 16u + lid.x] = select(0.0, Wt[oc * K_dim + kA], oc < C_out && kA < K_dim);
-    var vb : f32 = 0.0;
-    if (kB < K_dim && col < N) {
-      let ci = kB / K_sq;
-      let kk = kB % K_sq;
-      let ky = kk / K;
-      let kx = kk % K;
-      let iy = i32(oy * S) + i32(ky) - i32(PAD);
-      let ix = i32(ox * S) + i32(kx) - i32(PAD);
-      if (iy >= 0 && iy < i32(H) && ix >= 0 && ix < i32(W)) {
-        vb = X[(ci * H + u32(iy)) * W + u32(ix)];
+    let kBase = t * 16u;
+    for (var i : u32 = 0u; i < 4u; i = i + 1u) {
+      let idx = tid + i * 256u;
+
+      let ar  = idx / 16u;         // 0..63 output channel within tile
+      let ak  = idx % 16u;
+      let goc = bOc + ar;
+      let gak = kBase + ak;
+      tileA[idx] = select(0.0, Wt[goc * K_dim + gak], goc < C_out && gak < K_dim);
+
+      let bk   = idx / 64u;        // 0..15 k within tile
+      let bc   = idx % 64u;
+      let gbk  = kBase + bk;
+      let gcol = bCol + bc;
+      var vb : f32 = 0.0;
+      if (gbk < K_dim && gcol < N) {
+        let oy = gcol / W_out;
+        let ox = gcol % W_out;
+        let ci = gbk / K_sq;
+        let kk = gbk % K_sq;
+        let ky = kk / K;
+        let kx = kk % K;
+        let iy = i32(oy * S) + i32(ky) - i32(PAD);
+        let ix = i32(ox * S) + i32(kx) - i32(PAD);
+        if (iy >= 0 && iy < i32(H) && ix >= 0 && ix < i32(W)) {
+          vb = X[(ci * H + u32(iy)) * W + u32(ix)];
+        }
       }
+      tileB[idx] = vb;
     }
-    tileB[lid.y * 16u + lid.x] = vb;
     workgroupBarrier();
+
     for (var k : u32 = 0u; k < 16u; k = k + 1u) {
-      acc = acc + tileA[lid.y * 16u + k] * tileB[k * 16u + lid.x];
+      let cb = k * 64u + lid.x * 4u;
+      let bv = vec4<f32>(tileB[cb], tileB[cb + 1u], tileB[cb + 2u], tileB[cb + 3u]);
+      let ra = lid.y * 4u;
+      acc[0] = acc[0] + tileA[(ra + 0u) * 16u + k] * bv;
+      acc[1] = acc[1] + tileA[(ra + 1u) * 16u + k] * bv;
+      acc[2] = acc[2] + tileA[(ra + 2u) * 16u + k] * bv;
+      acc[3] = acc[3] + tileA[(ra + 3u) * 16u + k] * bv;
     }
     workgroupBarrier();
   }
-  if (oc < C_out && col < N) {
-    Y[oc * N + col] = bias[oc] + acc;
+
+  for (var i : u32 = 0u; i < 4u; i = i + 1u) {
+    let goc = bOc + lid.y * 4u + i;
+    if (goc < C_out) {
+      let bs = bias[goc];
+      let c0 = bCol + lid.x * 4u;
+      let base = goc * N;
+      if (c0 + 0u < N) { Y[base + c0 + 0u] = bs + acc[i].x; }
+      if (c0 + 1u < N) { Y[base + c0 + 1u] = bs + acc[i].y; }
+      if (c0 + 2u < N) { Y[base + c0 + 2u] = bs + acc[i].z; }
+      if (c0 + 3u < N) { Y[base + c0 + 3u] = bs + acc[i].w; }
+    }
   }
 }`
 
@@ -663,7 +704,8 @@ export function convMM(device) {
     const pass = encoder.beginComputePass()
     pass.setPipeline(pipeline)
     pass.setBindGroup(0, bg)
-    pass.dispatchWorkgroups(Math.ceil(HW / 16), Math.ceil(C_out / 16))
+    // One workgroup per 64x64 (C_out x spatial) tile; 4x4 outputs per thread.
+    pass.dispatchWorkgroups(Math.ceil(HW / 64), Math.ceil(C_out / 64))
     pass.end()
   }
 }

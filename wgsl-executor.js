@@ -1018,7 +1018,7 @@ OPS.Conv = (ctx, node, [x, w, bias]) => {
   const outDims = [N, C_out, H_out, W_out]
   const outBuf = ctx.pool.acquire(N * C_out * H_out * W_out * 4)
   const cfg = createUniform(ctx.device, new Uint32Array([C_in, C_out, K, K * K, H, W, PAD, S, H_out, W_out, 0, 0]))
-  if (LOG.verbose) dlog(`  Conv(MM) K=${K} S=${S} xDims=${x.dims} wDims=${w.dims} → ${outDims}  dispatch=(${Math.ceil(H_out*W_out/16)},${Math.ceil(C_out/16)})`)
+  if (LOG.verbose) dlog(`  Conv(MM) K=${K} S=${S} xDims=${x.dims} wDims=${w.dims} → ${outDims}  dispatch=(${Math.ceil(H_out*W_out/64)},${Math.ceil(C_out/64)})`)
   ctx.dispatchers.convMM(ctx.encoder, x.buf, w.buf, bias.buf, outBuf, cfg, C_out, H_out * W_out)
   return new Tensor({ buf: outBuf, dims: outDims })
 }
