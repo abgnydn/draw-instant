@@ -824,37 +824,76 @@ const WGSL_GEMM = `
 @group(0) @binding(2) var<storage, read>       C : array<f32>; // bias, length N
 @group(0) @binding(3) var<storage, read_write> Y : array<f32>;
 @group(0) @binding(4) var<uniform>             cfg : vec4<u32>; // [M, N, K, transB]
-var<workgroup> tileA : array<f32, 256>;
-var<workgroup> tileB : array<f32, 256>;
+// Same 64x64 / 4x4 register blocking as WGSL_MATMUL, with the bias folded into
+// the store and transB handled at gather time.
+var<workgroup> tileA : array<f32, 1024>; // 64 rows x 16 k
+var<workgroup> tileB : array<f32, 1024>; // 16 k   x 64 cols
 @compute @workgroup_size(16, 16)
 fn main(
   @builtin(workgroup_id)        wg  : vec3<u32>,
   @builtin(local_invocation_id) lid : vec3<u32>,
 ) {
   let M = cfg.x; let N = cfg.y; let K = cfg.z; let transB = cfg.w;
-  let row = wg.y * 16u + lid.y;
-  let col = wg.x * 16u + lid.x;
-  var acc : f32 = 0.0;
+
+  let bRow = wg.y * 64u;
+  let bCol = wg.x * 64u;
+  let tid  = lid.y * 16u + lid.x;
+
+  var acc : array<vec4<f32>, 4>;
+  acc[0] = vec4<f32>(0.0);
+  acc[1] = vec4<f32>(0.0);
+  acc[2] = vec4<f32>(0.0);
+  acc[3] = vec4<f32>(0.0);
+
   let tiles = (K + 15u) / 16u;
   for (var t : u32 = 0u; t < tiles; t = t + 1u) {
-    let kA = t * 16u + lid.x;
-    let kB = t * 16u + lid.y;
-    tileA[lid.y * 16u + lid.x] = select(0.0, A[row * K + kA], row < M && kA < K);
-    // transB=0: B is [K, N], index B[kB * N + col]
-    // transB=1: B is [N, K], index B[col * K + kB]
-    let bVal = select(
-      select(0.0, B[kB * N + col], kB < K && col < N),
-      select(0.0, B[col * K + kB], kB < K && col < N),
-      transB == 1u
-    );
-    tileB[lid.y * 16u + lid.x] = bVal;
+    let kBase = t * 16u;
+    for (var i : u32 = 0u; i < 4u; i = i + 1u) {
+      let idx = tid + i * 256u;
+
+      let ar  = idx / 16u;         // 0..63
+      let ak  = idx % 16u;
+      let gr  = bRow + ar;
+      let gak = kBase + ak;
+      tileA[idx] = select(0.0, A[gr * K + gak], gr < M && gak < K);
+
+      let bk  = idx / 64u;         // 0..15
+      let bc  = idx % 64u;
+      let gbk = kBase + bk;
+      let gc  = bCol + bc;
+      // transB=0: B is [K, N] → B[k * N + col];  transB=1: B is [N, K] → B[col * K + k]
+      let inB = gbk < K && gc < N;
+      tileB[idx] = select(
+        select(0.0, B[gbk * N + gc], inB),
+        select(0.0, B[gc * K + gbk], inB),
+        transB == 1u
+      );
+    }
     workgroupBarrier();
+
     for (var k : u32 = 0u; k < 16u; k = k + 1u) {
-      acc = acc + tileA[lid.y * 16u + k] * tileB[k * 16u + lid.x];
+      let cb = k * 64u + lid.x * 4u;
+      let bv = vec4<f32>(tileB[cb], tileB[cb + 1u], tileB[cb + 2u], tileB[cb + 3u]);
+      let ra = lid.y * 4u;
+      acc[0] = acc[0] + tileA[(ra + 0u) * 16u + k] * bv;
+      acc[1] = acc[1] + tileA[(ra + 1u) * 16u + k] * bv;
+      acc[2] = acc[2] + tileA[(ra + 2u) * 16u + k] * bv;
+      acc[3] = acc[3] + tileA[(ra + 3u) * 16u + k] * bv;
     }
     workgroupBarrier();
   }
-  if (row < M && col < N) { Y[row * N + col] = acc + C[col]; }
+
+  for (var i : u32 = 0u; i < 4u; i = i + 1u) {
+    let r = bRow + lid.y * 4u + i;
+    if (r < M) {
+      let c0 = bCol + lid.x * 4u;
+      let base = r * N;
+      if (c0 + 0u < N) { Y[base + c0 + 0u] = acc[i].x + C[c0 + 0u]; }
+      if (c0 + 1u < N) { Y[base + c0 + 1u] = acc[i].y + C[c0 + 1u]; }
+      if (c0 + 2u < N) { Y[base + c0 + 2u] = acc[i].z + C[c0 + 2u]; }
+      if (c0 + 3u < N) { Y[base + c0 + 3u] = acc[i].w + C[c0 + 3u]; }
+    }
+  }
 }`
 
 export function gemm(device) {
@@ -864,7 +903,8 @@ export function gemm(device) {
     const pass = encoder.beginComputePass()
     pass.setPipeline(pipeline)
     pass.setBindGroup(0, bg)
-    pass.dispatchWorkgroups(Math.ceil(N / 16), Math.ceil(M / 16))
+    // One workgroup per 64x64 output tile; 4x4 outputs per thread.
+    pass.dispatchWorkgroups(Math.ceil(N / 64), Math.ceil(M / 64))
     pass.end()
   }
 }

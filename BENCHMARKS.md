@@ -194,6 +194,13 @@ Matmul at SD-Turbo shapes, Apple M2 Max:
 | `[1024×1280] × [1280×5120]` | 202 GFLOP/s | ~900 GFLOP/s | 4.5× |
 | `[256×640] × [640×640]` | 252 GFLOP/s | ~650 GFLOP/s | 2.6× |
 
+Gemm (matmul + bias), `[1024×1280] × [1280×1280]`:
+
+| variant | before | after | gain |
+|---|---:|---:|---:|
+| `transB=0` | 249 GFLOP/s (13.5 ms) | 779 GFLOP/s (4.31 ms) | 3.1× |
+| `transB=1` | 222 GFLOP/s (15.1 ms) | 1374 GFLOP/s (2.44 ms) | 6.2× |
+
 Conv (implicit im2col, the same kernel shape) at SD-Turbo shapes:
 
 | conv | before | after | gain |

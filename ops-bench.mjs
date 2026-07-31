@@ -13,7 +13,7 @@
 // Correctness for these kernels lives in wgsl-ops-test.js (run ops-test.html);
 // this file only reports speed and must never be read as a correctness signal.
 
-import { matmul, convMM, createStorage, createOutput, createUniform } from './wgsl-ops.js'
+import { matmul, convMM, gemm, createStorage, createOutput, createUniform } from './wgsl-ops.js'
 import { measureOne } from './bench-timing.js'
 
 const med = (xs) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)]
@@ -100,4 +100,32 @@ for (const { label, C_in, C_out, K, H, W } of CONVS) {
   console.log(`${label}\n  ${ms.toFixed(3)} ms   ${gflops.toFixed(1)} GFLOP/s`)
 
   bufX.destroy(); bufW.destroy(); bufB.destroy(); bufY.destroy(); cfg.destroy()
+}
+
+// Gemm = matmul + bias, used by the executor for ONNX Gemm nodes.
+for (const transB of [0, 1]) {
+  const M = 1024, N = 1280, K = 1280
+  const A = new Float32Array(M * K)
+  const B = new Float32Array(K * N)
+  for (let i = 0; i < A.length; i++) A[i] = Math.sin(i * 0.001)
+  for (let i = 0; i < B.length; i++) B[i] = Math.cos(i * 0.001)
+
+  const bufA = createStorage(device, A)
+  const bufB = createStorage(device, B)
+  const bufC = createStorage(device, new Float32Array(N))
+  const bufY = createOutput(device, M * N * 4)
+  const cfg = createUniform(device, new Uint32Array([M, N, K, transB]))
+  const gm = gemm(device)
+
+  const run = () => {
+    const enc = device.createCommandEncoder()
+    gm(enc, bufA, bufB, bufC, bufY, cfg, M, N)
+    device.queue.submit([enc.finish()])
+  }
+
+  const ms = med(await measureOne(device, run))
+  const gflops = (2 * M * N * K) / (ms / 1000) / 1e9
+  console.log(`gemm transB=${transB}  [${M}x${K}] x [${K}x${N}]\n  ${ms.toFixed(3)} ms   ${gflops.toFixed(1)} GFLOP/s`)
+
+  bufA.destroy(); bufB.destroy(); bufC.destroy(); bufY.destroy(); cfg.destroy()
 }
