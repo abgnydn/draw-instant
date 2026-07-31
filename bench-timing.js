@@ -26,6 +26,14 @@ const MAX_N = 200
 const REPEATS = 7            // batch pairs per path; caller takes the median
 const WARM_MS = 400          // wall-clock warm-up to reach a steady GPU clock
 
+// Time a single kernel, same method as measurePair (warm to a steady clock,
+// calibrate a batch size, take the slope so the fence cancels). Use this for
+// absolute kernel throughput, where there is no ratio to protect.
+export async function measureOne(device, run, repeats = REPEATS) {
+  const { a } = await measurePair(device, run, run, repeats)
+  return a
+}
+
 // Measure two paths that will be divided into a ratio.
 //
 // Critically, the two are INTERLEAVED: one batch pair of A, then one of B, then

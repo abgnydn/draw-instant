@@ -175,6 +175,37 @@ sequential denoising loop. Discrete-GPU per-step numbers are the next data
 point — they're not in this table yet, and we won't quote them (or any external
 precedent) until they're measured from this repo.
 
+## Production-kernel throughput (`ops-bench.mjs`)
+
+The nine fused benches compare hand-written naive-vs-fused *pairs*. None of them
+touch the kernels that actually run inference — the ones in `wgsl-ops.js` that
+the graph executor dispatches. Kernel quality, as distinct from fusion, had no
+coverage at all until this.
+
+```sh
+deno run --unstable-webgpu -A ops-bench.mjs
+```
+
+Matmul at SD-Turbo shapes, Apple M2 Max:
+
+| shape | before | after | gain |
+|---|---:|---:|---:|
+| `[1024×1280] × [1280×1280]` | 295 GFLOP/s | ~830 GFLOP/s | 2.8× |
+| `[1024×1280] × [1280×5120]` | 202 GFLOP/s | ~900 GFLOP/s | 4.5× |
+| `[256×640] × [640×640]` | 252 GFLOP/s | ~650 GFLOP/s | 2.6× |
+
+"before" gave each thread a single output, so every fused-multiply-add needed two
+shared-memory reads — the kernel was bound by shared traffic rather than
+arithmetic. "after" blocks 4×4 outputs per thread over a 64×64 workgroup tile,
+amortising each pair of loads across 16 FMAs.
+
+Worth being clear about what this is and isn't: it changes **no** naive-vs-fused
+ratio, because both paths in those benches use their own matmuls. It moves the
+absolute number — time per image — which is the metric that actually matters and
+the one the fusion table never measured. Correctness is gated by
+`wgsl-ops-test.js` (27/27, including the batched and non-multiple-of-64 shapes
+that exercise the boundary guards).
+
 ## PyTorch head-to-head (`bench-torch.py`)
 
 Same op chain as the boot probe, same batch-slope timing method, same machine.

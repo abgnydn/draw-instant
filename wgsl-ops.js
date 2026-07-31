@@ -479,8 +479,15 @@ const WGSL_MATMUL = `
 @group(0) @binding(1) var<storage, read>       B : array<f32>;
 @group(0) @binding(2) var<storage, read_write> Y : array<f32>;
 @group(0) @binding(3) var<uniform>             cfg : vec4<u32>; // [M, N, K, bBatched]
-var<workgroup> tileA : array<f32, 256>; // 16*16
-var<workgroup> tileB : array<f32, 256>;
+// 64x64 output tile per workgroup over a 16-deep K tile. 256 threads, each
+// holding a 4x4 block of outputs in registers.
+//
+// The previous version gave each thread ONE output, so every fused-multiply-add
+// needed two shared-memory reads — the kernel was bound by shared traffic, not
+// arithmetic, and measured ~200-295 GFLOP/s on an M2 Max (low single-digit % of
+// the machine). Blocking 4x4 amortises each pair of loads over 16 FMAs.
+var<workgroup> tileA : array<f32, 1024>; // 64 rows x 16 k
+var<workgroup> tileB : array<f32, 1024>; // 16 k x 64 cols
 @compute @workgroup_size(16, 16)
 fn main(
   @builtin(workgroup_id)         wg  : vec3<u32>,
@@ -491,22 +498,61 @@ fn main(
   let aBase = bz * M * K;
   let bBase = select(0u, bz * K * N, cfg.w == 1u);
   let yBase = bz * M * N;
-  let row = wg.y * 16u + lid.y;
-  let col = wg.x * 16u + lid.x;
-  var acc : f32 = 0.0;
+
+  let bRow = wg.y * 64u;
+  let bCol = wg.x * 64u;
+  let tid  = lid.y * 16u + lid.x;
+
+  var acc : array<vec4<f32>, 4>;
+  acc[0] = vec4<f32>(0.0);
+  acc[1] = vec4<f32>(0.0);
+  acc[2] = vec4<f32>(0.0);
+  acc[3] = vec4<f32>(0.0);
+
   let tiles = (K + 15u) / 16u;
   for (var t : u32 = 0u; t < tiles; t = t + 1u) {
-    let kA = t * 16u + lid.x;
-    let kB = t * 16u + lid.y;
-    tileA[lid.y * 16u + lid.x] = select(0.0, A[aBase + row * K + kA], row < M && kA < K);
-    tileB[lid.y * 16u + lid.x] = select(0.0, B[bBase + kB * N + col], kB < K && col < N);
+    let kBase = t * 16u;
+    // Cooperative load: 1024 elements per tile, 256 threads, 4 apiece.
+    for (var i : u32 = 0u; i < 4u; i = i + 1u) {
+      let idx = tid + i * 256u;
+
+      let ar = idx / 16u;          // 0..63
+      let ak = idx % 16u;
+      let gAr = bRow + ar;
+      let gAk = kBase + ak;
+      tileA[idx] = select(0.0, A[aBase + gAr * K + gAk], gAr < M && gAk < K);
+
+      let bk = idx / 64u;          // 0..15
+      let bc = idx % 64u;
+      let gBk = kBase + bk;
+      let gBc = bCol + bc;
+      tileB[idx] = select(0.0, B[bBase + gBk * N + gBc], gBk < K && gBc < N);
+    }
     workgroupBarrier();
+
     for (var k : u32 = 0u; k < 16u; k = k + 1u) {
-      acc = acc + tileA[lid.y * 16u + k] * tileB[k * 16u + lid.x];
+      let cb = k * 64u + lid.x * 4u;
+      let bv = vec4<f32>(tileB[cb], tileB[cb + 1u], tileB[cb + 2u], tileB[cb + 3u]);
+      let ra = lid.y * 4u;
+      acc[0] = acc[0] + tileA[(ra + 0u) * 16u + k] * bv;
+      acc[1] = acc[1] + tileA[(ra + 1u) * 16u + k] * bv;
+      acc[2] = acc[2] + tileA[(ra + 2u) * 16u + k] * bv;
+      acc[3] = acc[3] + tileA[(ra + 3u) * 16u + k] * bv;
     }
     workgroupBarrier();
   }
-  if (row < M && col < N) { Y[yBase + row * N + col] = acc; }
+
+  for (var i : u32 = 0u; i < 4u; i = i + 1u) {
+    let r = bRow + lid.y * 4u + i;
+    if (r < M) {
+      let c0 = bCol + lid.x * 4u;
+      let base = yBase + r * N;
+      if (c0 + 0u < N) { Y[base + c0 + 0u] = acc[i].x; }
+      if (c0 + 1u < N) { Y[base + c0 + 1u] = acc[i].y; }
+      if (c0 + 2u < N) { Y[base + c0 + 2u] = acc[i].z; }
+      if (c0 + 3u < N) { Y[base + c0 + 3u] = acc[i].w; }
+    }
+  }
 }`
 
 export function matmul(device) {
@@ -516,7 +562,8 @@ export function matmul(device) {
     const pass = encoder.beginComputePass()
     pass.setPipeline(pipeline)
     pass.setBindGroup(0, bg)
-    pass.dispatchWorkgroups(Math.ceil(N / 16), Math.ceil(M / 16), batch)
+    // One workgroup per 64x64 output tile (each of its 256 threads holds 4x4).
+    pass.dispatchWorkgroups(Math.ceil(N / 64), Math.ceil(M / 64), batch)
     pass.end()
   }
 }
