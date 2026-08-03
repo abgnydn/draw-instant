@@ -1,6 +1,7 @@
 {
   "version": "5",
   "remote": {
-    "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2": "495b03b846b315baab6ff2e2f048085e45684b910799e36c4d7f2b4be00cff72"
+    "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2": "495b03b846b315baab6ff2e2f048085e45684b910799e36c4d7f2b4be00cff72",
+    "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.webgpu.bundle.min.mjs": "86d19a9e9e9ecb51aaba1a4f33378c1738b6b0c2d582f8ba259caa800434f38d"
   }
 }
