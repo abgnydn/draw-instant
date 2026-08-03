@@ -106,45 +106,64 @@ so its per-block delta compounds across the denoise loop.
 
 ---
 
-## Results — Apple M2 (reference)
+## Results
 
-All nine, Apple M2 Max, both runtimes, identical batch-slope timing. Chrome
-(Dawn) is what users get; Deno (wgpu) is the headless path. **Figures are medians
-across full sweeps**, with the individual runs shown — single runs vary too much
-to quote, and the probe varies too much even across sweeps.
+Two machines, identical batch-slope timing. **Apple M2 Max** via Chrome (Dawn)
+and Deno (wgpu); **NVIDIA Tesla T4** via Deno/Vulkan on Colab (driver 580,
+adapter reported as `Tesla T4`, not llvmpipe — CPU emulation would invalidate
+the numbers).
 
-| Block | Chrome (Dawn) | runs | Deno (wgpu) | verdict |
-|---|---:|---|---:|---|
-| Elementwise probe | **~2–6×** | 1.98 / 3.36 / 3.61 / 6.3 / 6.6 | ~2–6× | win, magnitude unstable |
-| Conv 3×3 | 1.02× | 1.03 / 1.02 / 0.92 | 0.93× | wash |
-| FFN | 1.00× | 0.91 / 1.23 / 1.00 | 0.97× | wash |
-| ResNet | 0.99× | 1.04 / 0.99 / 0.96 | 1.02× | wash |
-| Full transformer block | 0.97× | 0.88 / 0.97 / 0.97 | 0.95× | wash |
-| Attention | 0.99× | 1.03 / 0.99 / 0.98 | **0.55×** | wash / runtime-dependent |
-| Group norm | 0.88× | 0.81 / 0.99 / 0.88 | 0.96× | wash |
-| Cross-attention | 0.87× | 0.86 / 0.92 / 0.87 | 0.56× | **loss** |
-| Timestep embed | 0.11× | 0.12 / 0.11 / 0.10 | 0.12× | **loss** |
+| Block | M2 Max (Dawn) | M2 Max (wgpu) | **Tesla T4** |
+|---|---:|---:|---:|
+| Elementwise probe | ~2–6× | ~2–6× | **3.58×** |
+| Group norm | 0.88× | 0.96× | **1.15×** |
+| Conv 3×3 | 1.02× | 0.93× | 0.99× |
+| FFN | 1.00× | 0.97× | 0.99× |
+| Full transformer block | 0.97× | 0.95× | validation error |
+| ResNet | 0.99× | 1.02× | validation error |
+| Attention | 0.99× | 0.55× | 0.74× |
+| Cross-attention | 0.87× | 0.56× | 0.75× |
+| Timestep embed | 0.11× | 0.12× | 0.11× |
 
-**Only the elementwise probe wins.** Everything else is a wash or a loss on this
-hardware. The probe's *magnitude* is not reproducible — see the stability note in
-*Methodology* — but its direction is: it wins on every run, by at least ~1.6×. That is a harder result than previous versions of this document
-reported, and the difference is measurement, not kernels:
+### The discrete-GPU result
 
-- **Cross-attention was published as a 1.22× win. It is a ~0.87× loss** (0.56×
-  under wgpu). The "win" was the per-iteration fence adding a constant to both
-  paths, which flatters any ratio toward 1 and above.
-- **Attention was published as 1.05×; it is 0.99× on Dawn and 0.55× on wgpu.**
-  Anything said about this kernel has to name the runtime.
-- **The fused timestep embed loses ~9×** — 0.11× on Dawn, 0.12× on wgpu, tight
-  across every run. That one is real and reproducible.
+The roadmap's central bet was that fusion loses on Apple only because unified
+memory makes the eliminated round-trips cheap, and that a **discrete GPU, where
+kernel-launch overhead dominates, would show the win**. That is now measured,
+and it does not.
 
-Absolute times moved too (FFN naive 66.7 → ~84 ms). Per-iteration fencing left
-the GPU idle between iterations and let it boost; a batched submission is
-sustained load, so clocks settle lower. Sustained is the honest model for a
-denoising loop, and both paths are measured identically either way.
+On a real Tesla T4 the pattern is essentially the same as on Apple: the
+compute-bound blocks are washes (FFN 0.99×, conv 0.99×), three kernels lose
+(attention 0.74×, cross-attention 0.75×, timestep embed 0.11×), and only two
+things win.
 
-Supporting numbers: CLIP text encode ~60–90 ms; VAE graph is 525 nodes / 140
-tensors / ~99 MB.
+What the two winners have in common is the useful part. The elementwise probe
+moves ~52 MB through memory naively and ~12 MB fused — a 4.3× traffic reduction,
+and it measures 3.58×. GroupNorm is likewise bandwidth-bound, and it is the only
+block that wins on the T4 *and* improves relative to Apple (0.88× → 1.15×). Every
+block that loses or ties is either compute-bound or occupancy-limited.
+
+So the honest formulation is narrower than the original thesis:
+
+> **Fusion pays when the op is memory-bandwidth-bound. It does nothing when the
+> op is compute-bound, and it hurts when the fused kernel under-occupies the
+> GPU.** Dispatch count is not the variable that matters; bytes moved is.
+
+That reframing is not a rescue — a U-Net is dominated by convolutions and
+matmuls, which are exactly the compute-bound case where this predicts no win.
+
+Caveat worth stating plainly: a T4 is a 2018 inference card and slow in absolute
+terms (FFN 152 ms here vs 84 ms on the M2 Max). Because its compute is slow,
+launch overhead is a *smaller* fraction of runtime than it would be on a modern
+card, so a 4090 or an A100 is a stronger test of the launch-overhead thesis than
+this was. The direction of the evidence is negative so far, not final.
+
+### Known portability failures
+
+`fused-block-full.js` and `fused-resnet.js` both die with "validation error
+occurred" under Deno/wgpu on Vulkan while passing under Dawn on Metal. Those are
+real portability bugs in our WGSL, not measurement problems, and they are why two
+rows above are blank.
 
 ### Reading these honestly
 

@@ -10,7 +10,7 @@ Bar to beat: ORT Web + SDXL Turbo is ~1 s on RTX 4090 today. For "as-you-type" w
 
 Every browser SD today runs the U-Net denoising step as **dozens of kernel launches per step, times 20–50 steps**. On consumer GPUs the launch overhead dominates the arithmetic. This is the textbook case for 1-dispatch fusion — the sequential denoising loop is launch-overhead-bound, not bandwidth-bound.
 
-The same fusion work that delivered 159–720× over PyTorch on the fusion benchmark fleet (external `../fused-lora` numbers, not measured in this repo — our own head-to-head is `bench-torch.py`) applies directly here. We already recreated the TVM shader set (see `../fused-lora/src/tvm-shaders/`) — the pattern transfers.
+~~The same fusion work that delivered 159–720× over PyTorch on the fusion benchmark fleet applies directly here.~~ **Measured 2026-08: it does not.** On a real Tesla T4 the compute-bound blocks are washes and three kernels lose; only bandwidth-bound ops (elementwise chain, GroupNorm) win. See BENCHMARKS.md. The external `../fused-lora` numbers were never reproduced here. We already recreated the TVM shader set (see `../fused-lora/src/tvm-shaders/`) — the pattern transfers.
 
 ## The v0 → v5 trajectory
 
