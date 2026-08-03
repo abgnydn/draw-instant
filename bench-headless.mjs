@@ -56,17 +56,8 @@ async function adapterBanner() {
   return info
 }
 
-async function main() {
-  const filter = (Deno.args[0] || '').toLowerCase()
-  await adapterBanner()
-
-  const selected = BENCHES.filter(([label, , fn]) =>
-    !filter || label.toLowerCase().includes(filter) || fn.toLowerCase().includes(filter))
-  if (!selected.length) {
-    console.error(`No bench matched "${filter}". Options: ${BENCHES.map(b => b[2]).join(', ')}`)
-    Deno.exit(1)
-  }
-
+// Run one bench in this process.
+async function runInProcess(selected) {
   for (const [label, path, fn] of selected) {
     console.log(`\n### ${label}  (${fn})`)
     try {
@@ -79,6 +70,46 @@ async function main() {
       console.error(`  FAILED: ${e.message}`)
     }
   }
+}
+
+// Each bench gets its own process.
+//
+// Benches create their GPUDevice internally and only destroy it on the success
+// path, so one that throws part-way leaks the device. In-process that leak is
+// fatal to everything after it: on a 16 GB Tesla T4 the attention bench hit a
+// validation error and the six benches that followed all died with "Not enough
+// memory left". Process exit is the only cleanup that runs unconditionally.
+async function runIsolated(selected) {
+  const self = new URL(import.meta.url).pathname
+  for (const [, , fn] of selected) {
+    const cmd = new Deno.Command(Deno.execPath(), {
+      args: ['run', '--unstable-webgpu', '-A', self, fn, '--child'],
+      stdout: 'inherit',
+      stderr: 'inherit',
+    })
+    const { code } = await cmd.output()
+    if (code !== 0) console.error(`  (${fn} exited with code ${code})`)
+  }
+}
+
+async function main() {
+  const isChild = Deno.args.includes('--child')
+  const filter = (Deno.args.filter((a) => a !== '--child')[0] || '').toLowerCase()
+
+  const selected = BENCHES.filter(([label, , fn]) =>
+    !filter || label.toLowerCase().includes(filter) || fn.toLowerCase().includes(filter))
+  if (!selected.length) {
+    console.error(`No bench matched "${filter}". Options: ${BENCHES.map(b => b[2]).join(', ')}`)
+    Deno.exit(1)
+  }
+
+  if (isChild) {
+    await runInProcess(selected)
+    return
+  }
+
+  await adapterBanner()
+  await runIsolated(selected)
   console.log('\ndone.')
 }
 
