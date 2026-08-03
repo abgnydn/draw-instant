@@ -8,9 +8,13 @@ Bar to beat: ORT Web + SDXL Turbo is ~1 s on RTX 4090 today. For "as-you-type" w
 
 ## Why we can beat incumbents
 
-Every browser SD today runs the U-Net denoising step as **dozens of kernel launches per step, times 20–50 steps**. On consumer GPUs the launch overhead dominates the arithmetic. This is the textbook case for 1-dispatch fusion — the sequential denoising loop is launch-overhead-bound, not bandwidth-bound.
+**The original claim, kept here because it was wrong and that matters:** every browser SD runs the U-Net as dozens of kernel launches per step × 20–50 steps; on consumer GPUs launch overhead dominates the arithmetic; therefore 1-dispatch fusion is the textbook fix, and the loop is launch-overhead-bound rather than bandwidth-bound.
 
-~~The same fusion work that delivered 159–720× over PyTorch on the fusion benchmark fleet applies directly here.~~ **Measured 2026-08: it does not.** On a real Tesla T4 the compute-bound blocks are washes and three kernels lose; only bandwidth-bound ops (elementwise chain, GroupNorm) win. See BENCHMARKS.md. The external `../fused-lora` numbers were never reproduced here. We already recreated the TVM shader set (see `../fused-lora/src/tvm-shaders/`) — the pattern transfers.
+**Measured 2026-08 on a real Tesla T4 — it is not.** The compute-bound blocks are washes (FFN 0.99×, conv 0.99×), three kernels lose (attention 0.74×, cross-attn 0.75×, timestep embed 0.11×), and only the bandwidth-bound ones win (elementwise chain 3.58×, GroupNorm 1.15×). Apple showed the same pattern, so unified memory was never the explanation. The external `../fused-lora` 159–720× figures were never reproduced in this repo and are not evidence for it.
+
+What survives is narrower and still useful: **fusion pays when an op is memory-bandwidth-bound, does nothing when it is compute-bound, and hurts when the fused kernel under-occupies the GPU.** Bytes moved, not dispatch count. A U-Net is mostly convs and matmuls — the compute-bound case — so this is not a path to <100 ms/step on its own.
+
+Where measured speed actually came from: **kernel quality.** The production kernels were running at low single-digit percent of the machine; register-blocking gave matmul 2.6–4.5×, conv 4–5.3×, Gemm 3.1–6.2×. See BENCHMARKS.md.
 
 ## The v0 → v5 trajectory
 
@@ -25,7 +29,7 @@ Each version ships a real number, a real commit, and something the user can see.
 ### v0.1 ✓ — fusion probe
 - Element-wise chain (mul·add → relu → sub → tanh → mul → sigmoid) over 1M floats
 - Fused (1 dispatch) vs. naive (6 dispatches), real numbers on this device
-- Honest Apple-Silicon finding: ~1× on unified memory, thesis holds on discrete GPUs
+- Honest Apple-Silicon finding: ~1× on unified memory. (Later measured on a Tesla T4 too: this probe is the *one* clear winner at 3.58×, because it is bandwidth-bound — not because of launch overhead.)
 
 ### v0.2 ✓ — ORT Web + WebGPU EP
 - ONNX Runtime Web 1.20.1 loaded from jsdelivr CDN on boot
@@ -41,7 +45,7 @@ Each version ships a real number, a real commit, and something the user can see.
 - Naive (4 dispatches) vs. fused (2 dispatches, GELU + residual in matmul epilogues)
 - Same tiled matmul both paths — delta is fusion, not kernel quality
 - Correctness: 0 max abs diff. Apple M2: 66.7/66.1 ms = 1.01× (wash, compute-bound)
-- Ships the harness — numbers on discrete GPUs are the next data point
+- Ships the harness. Discrete-GPU number now in: **T4 0.99× — also a wash.**
 
 ### v1.1 → fused attention block
 - QKV projection + scaled-dot-product + output projection, single-dispatch flash-attention style
@@ -58,7 +62,7 @@ Each version ships a real number, a real commit, and something the user can see.
 - Fused: 9 dispatches (flash-attn collapses 3→1, GELU folds into FFN-up epilogue, both residuals fold into producer matmul epilogues)
 - Roadmap originally aspired to 3 dispatches but full-row LayerNorm/softmax reductions block matmul→matmul fusion without re-designing the whole block. 14→9 is what the math allows with same kernel quality
 - Apple M2 result: 28.6 ms naive / 28.3 ms fused = 1.01× (wash). Correctness 8.0e-7 max abs diff
-- Same Apple-Silicon pattern as v0.1, v1, v1.1 — thesis holds on discrete GPUs + compounds ×16 per U-Net step
+- Same Apple-Silicon pattern as v0.1, v1, v1.1. On the T4 this block throws a Vulkan validation error and is unmeasured; every other compute-bound block was a wash there.
 
 ### v2 ◐ (partial) — first real latent via ORT U-Net + our scheduler
 - `scheduler.js`: Euler Discrete scheduler (scaled-linear betas, trailing timestep spacing — matches diffusers SD-Turbo). `makeEulerScheduler(n)` → { timesteps, sigmas, initNoiseSigma, scaleModelInput, step }
@@ -75,7 +79,7 @@ Each version ships a real number, a real commit, and something the user can see.
 - Replace ORT U-Net with our WGSL dispatch loop re-using v1.2 block at each of the ~16 transformer sites
 - Parse ONNX protobuf, extract weights into our layout (f32 for first pass; f16 quantization later)
 - First non-ORT denoise on-device
-- Target: **<100 ms/step on a mid-range discrete GPU**; Apple numbers published whatever they are
+- Target: **<100 ms/step on a mid-range discrete GPU**; Apple numbers published whatever they are. Note the T4 result: this will come from kernel quality and reduced work, not from collapsing dispatch counts.
 
 ### v3 → VAE decode → first pixels on canvas
 - Load SD-Turbo VAE decoder (~99 MB) — can stay in ORT for now, it runs once per image
@@ -110,7 +114,7 @@ Each version ships a real number, a real commit, and something the user can see.
 ## Open questions
 
 - **Weight format?** We extract tensors from the `.onnx` protobuf; f16 versions of schmuell's repo don't exist yet, so we run f32 for v2 and do our own f16 quantization pass if needed.
-- **Mobile story?** Apple/iOS 26 WebGPU is solid. Android Adreno WebGPU is where the 826× Qualcomm figure came from — v1.2 block numbers will tell us which mobile path is viable.
+- **Mobile story?** Apple/iOS 26 WebGPU is solid. The 826× Qualcomm/Adreno figure is external and unreproduced here — given the T4 result, treat it as unverified until measured from this repo.
 - **Correctness eval?** For v2+ we pixel-diff vs. the reference ORT+schmuell path at identical seed/prompt/steps. Latent-space L2 threshold set empirically.
 
 ## Metric we live by
