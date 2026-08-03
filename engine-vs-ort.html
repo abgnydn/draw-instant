@@ -32,7 +32,11 @@
       try {
         const { initORT } = await import('./ort.js')
         const ort = await import('./vae.js')
-        const wgsl = await import('./vae-wgsl.js')
+        // vae-wgsl.js propagates its own ?v= to the parser/executor/ops chain.
+        // Without it those stay in the browser's module cache across reloads —
+        // which silently ran a stale executor for three attempts here. ort.js and
+        // vae.js stay UNVERSIONED so they keep module identity with each other.
+        const wgsl = await import(`./vae-wgsl.js?v=${Date.now()}`)
         const { sampleNoiseLatent } = await import('./scheduler.js')
 
         p('init ORT…')

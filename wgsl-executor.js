@@ -222,11 +222,25 @@ OPS.Constant = (ctx, node, _inputs) => {
   if (aInt && aInt.i != null) {
     return { isShape: true, cpuData: BigInt64Array.from([BigInt(aInt.i)]), dims: [], dtype: 'int64' }
   }
+  // Float attributes are real data, not shape metadata, so they must land on the
+  // GPU exactly like the float TensorProto path above — returning cpuData alone
+  // gives downstream GPU ops a tensor with no buf and no byteLength, and
+  // createBuffer(undefined) throws "Value is not of type 'unsigned long long'".
+  //
+  // These two branches were dead until the ONNX parser learned to read
+  // AttributeProto floats (field 7 previously parsed as zero bytes), so the
+  // first thing that exercised them was the VAE decoder's attention Sqrt.
+  const uploadFloats = (arr, dims) => {
+    const f32 = arr instanceof Float32Array ? arr : new Float32Array(arr)
+    const buf = ctx.pool.acquire(Math.max(f32.byteLength, 4))
+    ctx.device.queue.writeBuffer(buf, 0, f32.buffer, f32.byteOffset, f32.byteLength)
+    return new Tensor({ buf, dims, cpuData: f32 })
+  }
   if (aFloats && aFloats.floats) {
-    return { isShape: false, cpuData: new Float32Array(aFloats.floats), dims: [aFloats.floats.length], dtype: 'float32' }
+    return uploadFloats(aFloats.floats, [aFloats.floats.length])
   }
   if (aFloat && aFloat.f != null) {
-    return { isShape: false, cpuData: new Float32Array([aFloat.f]), dims: [], dtype: 'float32' }
+    return uploadFloats([aFloat.f], [])
   }
   throw new Error(`Constant ${node.name}: no recognised value attribute`)
 }
@@ -640,8 +654,33 @@ for (const op of ['Add', 'Sub', 'Mul', 'Div']) {
 }
 
 // --- elementwise unary ---
+//
+// CPU counterparts for the shape subgraph. SD computes its attention scale from
+// the runtime shape — Shape → Gather → Cast → Sqrt → Div yields 1/sqrt(head_dim)
+// — so Sqrt legitimately receives a 1-element shape tensor that lives on the CPU
+// and has no buf and no byteLength. Allocating a GPU buffer for it fails with
+// createBuffer(undefined): "Value is not of type 'unsigned long long'".
+const UNARY_CPU = {
+  Sigmoid: (v) => 1 / (1 + Math.exp(-v)),
+  Sqrt: (v) => Math.sqrt(Math.max(v, 0)),
+  Abs: (v) => Math.abs(v),
+  Neg: (v) => -v,
+  // Abramowitz-Stegun 7.1.26, matching WGSL_UNARY's erf_approx.
+  Erf: (v) => {
+    const t = 1 / (1 + 0.3275911 * Math.abs(v))
+    const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-v * v)
+    return v >= 0 ? y : -y
+  },
+}
+
 for (const op of ['Sigmoid', 'Sqrt', 'Erf', 'Abs', 'Neg']) {
   OPS[op] = (ctx, node, [x]) => {
+    if (x && !x.buf && x.cpuData) {
+      const src = x.cpuData
+      const out = new Float32Array(src.length)
+      for (let i = 0; i < src.length; i++) out[i] = UNARY_CPU[op](Number(src[i]))
+      return { isShape: true, cpuData: out, dims: (x.dims || []).slice(), dtype: 'float32' }
+    }
     const outBuf = ctx.pool.acquire(x.byteLength)
     ctx.dispatchers.unary[op](ctx.encoder, x.buf, outBuf, x.numel)
     return new Tensor({ buf: outBuf, dims: x.dims.slice() })
