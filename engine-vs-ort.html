@@ -1,0 +1,99 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>engine vs ORT — the comparison the repo is named after</title>
+  <style>
+    body { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; margin: 24px; max-width: 900px; }
+    pre { background: #f5f5f5; padding: 12px; border-radius: 6px; overflow: auto; white-space: pre-wrap; }
+    button { font: inherit; padding: 6px 12px; }
+    h1 { font-size: 18px; }
+  </style>
+</head>
+<body>
+  <h1>our WGSL engine vs ONNX Runtime Web</h1>
+  <p>
+    The whole repo is framed around ORT being "the number to beat", but the nine
+    fusion benches only ever compare naive-vs-fused <em>within</em> our own code.
+    This runs the one comparison that was never made: the same VAE decode, the
+    same latent, the same machine — ORT Web vs our parser + executor + kernels.
+  </p>
+  <p>Downloads the ~99 MB VAE decoder (cached after the first run).</p>
+  <p><button id="go">Run comparison</button></p>
+  <pre id="log">idle</pre>
+
+  <script type="module">
+    const log = document.getElementById('log')
+    const p = (s) => { log.textContent += s + '\n'; console.log(s) }
+    const med = (xs) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)]
+
+    document.getElementById('go').onclick = async () => {
+      log.textContent = ''
+      try {
+        const { initORT } = await import('./ort.js')
+        const ort = await import('./vae.js')
+        const wgsl = await import('./vae-wgsl.js')
+        const { sampleNoiseLatent } = await import('./scheduler.js')
+
+        p('init ORT…')
+        await initORT()
+
+        p('loading ORT VAE decoder…')
+        let t0 = performance.now()
+        await ort.loadVAE(() => {})
+        const ortLoadMs = performance.now() - t0
+
+        p('loading our engine (fetch + hand-rolled ONNX parse + kernel build)…')
+        t0 = performance.now()
+        await wgsl.loadVAEWGSL(() => {})
+        const wgslLoadMs = performance.now() - t0
+
+        // Same latent into both. Seeded, so this is reproducible.
+        const latent = sampleNoiseLatent(1, 64, 64, 1234, 1.0)
+        const opts = { B: 1, lH: 64, lW: 64 }
+
+        p('\nwarm-up…')
+        const a0 = await ort.vaeDecode(latent, opts)
+        const b0 = await wgsl.vaeDecodeWGSL(latent, opts)
+
+        // Correctness first. A faster wrong answer is not a result.
+        const A = a0.image, B = b0.image
+        let maxAbs = 0, num = 0, den = 0
+        const n = Math.min(A.length, B.length)
+        for (let i = 0; i < n; i++) {
+          const d = Math.abs(A[i] - B[i])
+          if (d > maxAbs) maxAbs = d
+          num += d * d; den += A[i] * A[i]
+        }
+        const relL2 = Math.sqrt(num / Math.max(den, 1e-12))
+        p(`\ncorrectness  (ours vs ORT, ${n} pixels)`)
+        p(`  max abs diff   ${maxAbs.toExponential(2)}`)
+        p(`  relative L2    ${relL2.toExponential(2)}`)
+        p(`  dims           ORT ${a0.dims}  ·  ours ${b0.dims}`)
+
+        // Interleaved timing: measuring all of A then all of B lets machine
+        // drift land in the ratio (learned the hard way in bench-timing.js).
+        p('\ntiming (interleaved, 5 runs each)…')
+        const ortMs = [], wgslMs = []
+        for (let i = 0; i < 5; i++) {
+          let t = performance.now(); await ort.vaeDecode(latent, opts); ortMs.push(performance.now() - t)
+          t = performance.now(); await wgsl.vaeDecodeWGSL(latent, opts); wgslMs.push(performance.now() - t)
+        }
+        const o = med(ortMs), w = med(wgslMs)
+
+        p('')
+        p(`  ORT Web        ${o.toFixed(1)} ms   [${ortMs.map(x => x.toFixed(0)).join(', ')}]`)
+        p(`  our engine     ${w.toFixed(1)} ms   [${wgslMs.map(x => x.toFixed(0)).join(', ')}]`)
+        p('')
+        p(`  ratio          ${(o / w).toFixed(2)}x  ${o > w ? '(ours faster)' : '(ORT faster)'}`)
+        p('')
+        p(`  load: ORT ${(ortLoadMs / 1000).toFixed(1)}s  ·  ours ${(wgslLoadMs / 1000).toFixed(1)}s`)
+        p('')
+        p(maxAbs > 1e-2
+          ? 'WARNING: outputs differ materially — the timing comparison is meaningless\nuntil that is explained.'
+          : 'Outputs agree, so the timing comparison is meaningful.')
+      } catch (e) { p('ERR ' + (e.stack || e.message)); console.error(e) }
+    }
+  </script>
+</body>
+</html>
