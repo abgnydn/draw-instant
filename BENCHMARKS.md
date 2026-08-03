@@ -194,6 +194,54 @@ sequential denoising loop. Discrete-GPU per-step numbers are the next data
 point — they're not in this table yet, and we won't quote them (or any external
 precedent) until they're measured from this repo.
 
+## Our engine vs ONNX Runtime Web (`engine-vs-ort.mjs` / `.html`)
+
+The repo is framed around ORT being "the number to beat" — README and ROADMAP
+both say so — but the nine fusion benches only ever compare naive-vs-fused
+*within* our own code. This is that comparison, finally run: same VAE decode,
+same seeded latent, same machine, correctness checked before speed.
+
+**Apple M2 Max, Deno/wgpu**, latent `[1,4,64,64]` → image `[1,3,512,512]`:
+
+| path | median | runs |
+|---|---:|---|
+| ORT Web | **3491.7 ms** | 3412, 3612, 3439, 3526, 3492 |
+| our engine | **4015.1 ms** | 4055, 4417, 4015, 3960, 3870 |
+
+| | |
+|---|---|
+| ratio | **0.87×** — ORT faster by ~15% |
+| correctness | relL2 **1.06e-2** over 786k pixels, dims match |
+| load | ORT 9.5 s · ours 12.1 s (ours includes the hand-rolled ONNX parse) |
+
+**A from-scratch parser + executor + kernel library lands within ~15% of ONNX
+Runtime Web.** Not faster — but close, and correct. Worth noting the kernel work
+in the section above is what made it close: conv alone was 4–5× slower before
+register blocking, so this same comparison a week earlier would have been
+several times worse.
+
+The honest reading: **the engine is a control tool, not a speed tool.** Its value
+is doing what ORT structurally cannot — per-node caching, custom quantization,
+graph surgery — and being within 15% means exercising that control no longer
+costs a speed penalty. It did a week ago.
+
+Absolute times here are Deno/wgpu-specific and slow; Dawn is markedly faster on
+heavy work (FFN 236 ms wgpu vs 84 ms Chrome). Both paths run under the same
+runtime, so the ratio is the meaningful figure, not the milliseconds. Running
+`engine-vs-ort.html` in a browser gives Dawn numbers — but only on an idle
+machine: on a loaded laptop it produced 17–65 s decodes with 5× variance.
+
+### The T4 cross-check does not run
+
+ORT Web loads fine under Deno on **Metal**, which is how the numbers above were
+obtained. Under Deno on **Vulkan** (Colab, Tesla T4) its WebGPU execution
+provider fails: the session builds, then inference dies with `OperationError:
+Buffer with '' label is invalid`. That is the same class of wgpu/Vulkan
+incompatibility that makes `fused-block-full` and `fused-resnet` throw
+validation errors there. So the engine-vs-ORT ratio is currently an
+Apple/Metal number only; a discrete-GPU ratio needs either a browser on a real
+GPU box or an ORT build that survives Vulkan.
+
 ## Cache probe — is as-you-type doing redundant work? (`cache-probe.mjs` / `.html`)
 
 Every keystroke re-runs the whole network for a one-character change. Before
