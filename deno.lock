@@ -1,0 +1,6 @@
+{
+  "version": "5",
+  "remote": {
+    "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2": "495b03b846b315baab6ff2e2f048085e45684b910799e36c4d7f2b4be00cff72"
+  }
+}

@@ -1,0 +1,196 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>cache probe — how much changes per keystroke</title>
+  <style>
+    body { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; margin: 24px; max-width: 1000px; }
+    pre { background: #f5f5f5; padding: 12px; border-radius: 6px; overflow: auto; white-space: pre-wrap; }
+    button { font: inherit; padding: 6px 12px; margin-right: 8px; }
+    h1 { font-size: 18px; }
+  </style>
+</head>
+<body>
+  <h1>cache probe</h1>
+  <p>
+    As-you-type generation re-runs the whole network for a one-character change.
+    This measures how much actually changes, which bounds how much could be reused.
+  </p>
+  <p>
+    <b>Stage 1</b> is free (tokenizer only): how many of the 77 token slots move
+    when you add one character.
+    <b>Stage 2</b> downloads the ~650 MB text encoder and measures how far that
+    propagates into the [1,77,1024] conditioning tensor the U-Net consumes.
+  </p>
+  <p>
+    <button id="s1">Stage 1 — token deltas (free)</button>
+    <button id="s2">Stage 2 — embedding deltas (~650 MB)</button>
+    <button id="s3">Stage 3 — camera-frame latents (~68 MB)</button>
+  </p>
+  <pre id="log">idle</pre>
+
+  <script type="module">
+    const log = document.getElementById('log')
+    log.textContent = ''
+    const p = (s) => { log.textContent += s + '\n'; console.log(s) }
+
+    // Simulate typing: every prefix of the prompt, from 8 chars on.
+    const PROMPT = 'a red panda astronaut, studio photo, dramatic light'
+    const prefixes = []
+    for (let i = 8; i <= PROMPT.length; i++) prefixes.push(PROMPT.slice(0, i))
+
+    document.getElementById('s1').onclick = async () => {
+      log.textContent = ''
+      try {
+        const { loadTokenizer } = await import('./sd.js')
+        p('loading tokenizer…')
+        const tok = await loadTokenizer()
+        p(`prompt: "${PROMPT}"`)
+        p(`simulating ${prefixes.length} keystrokes\n`)
+
+        const idsFor = (text) => {
+          const enc = tok(text, { padding: 'max_length', max_length: 77, truncation: true })
+          const src = enc.input_ids.data ?? enc.input_ids
+          const out = new Int32Array(77)
+          for (let i = 0; i < 77; i++) out[i] = Number(src[i])
+          // SD-Turbo pads with 0 after the first eos (see text-encoder.js).
+          const eos = out.indexOf(49407)
+          if (eos !== -1) out.fill(0, eos + 1)
+          return out
+        }
+
+        let totalChanged = 0, worst = 0
+        const hist = new Map()
+        let prev = idsFor(prefixes[0])
+        for (let k = 1; k < prefixes.length; k++) {
+          const cur = idsFor(prefixes[k])
+          let changed = 0, firstIdx = -1
+          for (let i = 0; i < 77; i++) {
+            if (cur[i] !== prev[i]) { changed++; if (firstIdx < 0) firstIdx = i }
+          }
+          totalChanged += changed
+          if (changed > worst) worst = changed
+          hist.set(changed, (hist.get(changed) || 0) + 1)
+          prev = cur
+        }
+        const n = prefixes.length - 1
+        p(`token slots changed per keystroke (out of 77):`)
+        for (const k of [...hist.keys()].sort((a, b) => a - b)) {
+          p(`  ${String(k).padStart(2)} slots : ${'█'.repeat(hist.get(k))} (${hist.get(k)}/${n} keystrokes)`)
+        }
+        p(`\n  mean  ${(totalChanged / n).toFixed(2)} of 77 slots  (${(100 * totalChanged / n / 77).toFixed(1)}%)`)
+        p(`  worst ${worst} of 77 slots`)
+        p(`\nVERDICT: ${(100 * totalChanged / n / 77) < 10
+          ? 'token input is highly stable per keystroke — stage 2 is worth running.'
+          : 'token input churns a lot; caching downstream of the encoder looks weak.'}`)
+      } catch (e) { p('ERR ' + (e.stack || e.message)); console.error(e) }
+    }
+
+    document.getElementById('s2').onclick = async () => {
+      log.textContent = ''
+      try {
+        const { initORT } = await import('./ort.js')
+        const { loadTokenizer } = await import('./sd.js')
+        const te = await import('./text-encoder.js')
+        p('init ORT…'); await initORT()
+        p('loading tokenizer…'); const tok = await loadTokenizer()
+        p('loading SD-Turbo text encoder (~650 MB, cached after first run)…')
+        await te.loadSDTextEncoder((msg, f) => { log.textContent = log.textContent.replace(/\n[^\n]*$/, '\n' + `  ${msg} ${(f * 100 | 0)}%`) })
+        p('\nencoding prefixes…')
+
+        // Compare consecutive keystrokes across a sample of the typing sequence.
+        const sample = prefixes.filter((_, i) => i % 6 === 0).slice(-8)
+        let prev = null, prevText = null
+        p('\n  keystroke                        relL2   maxAbs   rows>1e-3')
+        for (const text of sample) {
+          const r = await te.encodeSDPrompt(text, tok)
+          const cur = r.embedding instanceof Float32Array ? r.embedding : new Float32Array(r.embedding.data ?? r.embedding)
+          if (prev) {
+            let num = 0, den = 0, maxAbs = 0
+            const D = 1024, T = 77
+            let rowsChanged = 0
+            for (let t = 0; t < T; t++) {
+              let rowD = 0
+              for (let d = 0; d < D; d++) {
+                const i = t * D + d
+                const df = cur[i] - prev[i]
+                num += df * df; den += prev[i] * prev[i]
+                if (Math.abs(df) > maxAbs) maxAbs = Math.abs(df)
+                rowD += df * df
+              }
+              if (Math.sqrt(rowD / D) > 1e-3) rowsChanged++
+            }
+            const rel = Math.sqrt(num / Math.max(den, 1e-12))
+            p(`  …${prevText.slice(-14).padEnd(14)}→ +1ch   ${rel.toFixed(4)}  ${maxAbs.toFixed(4)}   ${rowsChanged}/77`)
+          }
+          prev = cur; prevText = text
+        }
+        p('\nrelL2 is the whole-tensor relative change. rows>1e-3 counts how many of')
+        p('the 77 token positions moved at all — the U-Net cross-attends over all of')
+        p('them, so a low count means most of the conditioning is literally unchanged.')
+      } catch (e) { p('ERR ' + (e.stack || e.message)); console.error(e) }
+    }
+
+    // Stage 3: the camera regime. Here the PROMPT is fixed, so conditioning is
+    // bit-identical between frames and only the image moves. That is the mirror
+    // image of stage 2, and the U-Net input is (latent, timestep, cond) — so if
+    // the latent barely moves, nearly the whole input is unchanged.
+    document.getElementById('s3').onclick = async () => {
+      log.textContent = ''
+      try {
+        const { initORT } = await import('./ort.js')
+        const ve = await import('./vae-encoder.js')
+        p('init ORT…'); await initORT()
+        p('loading VAE encoder (~68 MB)…')
+        await ve.loadVAEEncoder(() => {})
+
+        // Two synthetic frames a webcam-step apart: same scene, sub-pixel drift
+        // plus a little sensor noise. Not a real camera, but the right scale.
+        const H = 512, W = 512
+        const frame = (dx, noise) => {
+          const out = new Float32Array(3 * H * W)
+          const plane = H * W
+          for (let y = 0; y < H; y++) {
+            for (let x = 0; x < W; x++) {
+              const u = (x + dx) / W, v = y / H
+              const base = Math.sin(u * 12) * Math.cos(v * 9) * 0.6
+                         + Math.sin((u + v) * 25) * 0.2
+              for (let c = 0; c < 3; c++) {
+                const n = noise ? (Math.sin((x * 7 + y * 13 + c * 29) * 0.37) * noise) : 0
+                out[c * plane + y * W + x] = Math.max(-1, Math.min(1, base + c * 0.05 + n))
+              }
+            }
+          }
+          return out
+        }
+
+        p('encoding frame N and frame N+1…')
+        const a = (await ve.vaeEncode(frame(0, 0.0), { B: 1, H, W })).latent
+        const b = (await ve.vaeEncode(frame(0.5, 0.01), { B: 1, H, W })).latent
+
+        let num = 0, den = 0, maxAbs = 0, moved = 0
+        for (let i = 0; i < a.length; i++) {
+          const d = b[i] - a[i]
+          num += d * d; den += a[i] * a[i]
+          if (Math.abs(d) > maxAbs) maxAbs = Math.abs(d)
+          if (Math.abs(d) > 1e-3) moved++
+        }
+        const rel = Math.sqrt(num / Math.max(den, 1e-12))
+        p('')
+        p(`  latent elements     ${a.length}`)
+        p(`  relL2               ${rel.toFixed(4)}`)
+        p(`  max abs             ${maxAbs.toFixed(4)}`)
+        p(`  elements > 1e-3     ${moved}/${a.length} (${(100*moved/a.length).toFixed(1)}%)`)
+        p('')
+        p('NOTE: the VAE encoder graph contains RandomNormalLike, so it SAMPLES the')
+        p('posterior — part of this delta is the sampler, not the frame change.')
+        p('Re-encoding an identical frame gives the noise floor:')
+        const c = (await ve.vaeEncode(frame(0, 0.0), { B: 1, H, W })).latent
+        let n2 = 0, d2 = 0
+        for (let i = 0; i < a.length; i++) { const d = c[i] - a[i]; n2 += d*d; d2 += a[i]*a[i] }
+        p(`  identical-frame relL2  ${Math.sqrt(n2/Math.max(d2,1e-12)).toFixed(4)}  <- floor`)
+      } catch (e) { p('ERR ' + (e.stack || e.message)); console.error(e) }
+    }
+  </script>
+</body>
+</html>

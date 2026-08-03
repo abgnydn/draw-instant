@@ -4,9 +4,11 @@
 // Output : latent [1, 4, 64, 64]   f32, already multiplied by SCALING_FACTOR
 //
 // The schmuell bundle ships vae_encoder/model.onnx alongside the decoder we
-// already use. The graph samples the posterior internally (RandomNormalLike is
-// baked into the export), so encoding the same frame twice yields slightly
-// different latents — fine because img2img adds noise on top anyway.
+// already use. The graph does contain RandomNormalLike, but measured behaviour
+// is deterministic: encoding the same frame twice gives relL2 = 0.0000 (see
+// cache-probe.html stage 3). Do not assume the output is sampled — an earlier
+// version of this comment claimed it was, on the strength of the op being
+// present in the graph rather than on a measurement.
 
 import { getORT, createSession } from './ort.js'
 

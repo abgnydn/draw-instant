@@ -194,6 +194,62 @@ sequential denoising loop. Discrete-GPU per-step numbers are the next data
 point — they're not in this table yet, and we won't quote them (or any external
 precedent) until they're measured from this repo.
 
+## Cache probe — is as-you-type doing redundant work? (`cache-probe.mjs` / `.html`)
+
+Every keystroke re-runs the whole network for a one-character change. Before
+building any reuse machinery, measure how much actually changes. Three stages,
+cheapest first, so a negative result costs little.
+
+**Stage 1 — token input** (`deno run -A cache-probe.mjs`, no model, no GPU).
+Typing out a 51-character prompt, 43 keystrokes:
+
+| | |
+|---|---|
+| token slots changed per keystroke | mean **1.72 of 77** (2.2%) |
+| worst case | 3 of 77 |
+| keystrokes changing *nothing* | 5 of 43 (BPE absorbed the character) |
+
+**Stage 2 — conditioning tensor** (browser, ~650 MB encoder). That 2.2% input
+change becomes:
+
+| | |
+|---|---|
+| relative L2 change of `[1,77,1024]` cond | **0.34 – 0.43** |
+| token rows moved > 1e-3 | **68 – 74 of 77** |
+
+**A 2.2% input change produces a ~37% output change across ~90% of positions.**
+CLIP's attention is causal, so only positions *before* the first changed token
+are preserved — everything after it, including every padding row, shifts. Reuse
+of conditioning-dependent activations across keystrokes is not viable.
+
+**Stage 3 — the camera regime** (browser, ~68 MB encoder). Here the prompt is
+fixed, so conditioning is bit-identical and only the image moves. Two frames a
+webcam-step apart (sub-pixel drift + 1% noise):
+
+| | |
+|---|---|
+| relative L2 change of the latent | **0.091** |
+| identical-frame floor | **0.0000** (encoder is deterministic) |
+
+### What this says
+
+Typing and camera are opposite regimes, and only one of them is promising:
+
+- **As-you-type: dead for caching.** The conditioning changes ~37% per
+  keystroke. What remains exactly reusable is only the conditioning-independent
+  prefix — `conv_in`, the timestep embedding, and the first ResNet — plus the
+  ~12% of keystrokes where the token sequence is byte-identical and the entire
+  generation can simply be skipped. That last one is free and worth doing.
+- **Camera: 4× more stable, and the conditioning is identical.** A 9% latent
+  drift with unchanged cond is the regime where approximate reuse of deep
+  features (DeepCache-style) has room. It is also the most differentiated thing
+  the product does.
+
+Not yet measured: how a 9% input drift propagates through the U-Net's
+activations. That needs the per-node diff against the 1.73 GB model, and it is
+the remaining question — but the input-side evidence already says to point that
+effort at camera mode rather than at typing.
+
 ## Production-kernel throughput (`ops-bench.mjs`)
 
 The nine fused benches compare hand-written naive-vs-fused *pairs*. None of them
