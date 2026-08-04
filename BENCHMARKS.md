@@ -194,6 +194,55 @@ sequential denoising loop. Discrete-GPU per-step numbers are the next data
 point — they're not in this table yet, and we won't quote them (or any external
 precedent) until they're measured from this repo.
 
+## Where the bytes actually go (`LOG.traffic`)
+
+"Bytes moved, not dispatch count" was the conclusion of the fusion work, so the
+obvious next lever was quantisation — fewer bytes per weight. Before building
+it, the executor grew an opt-in traffic counter (`LOG.traffic`) that records
+what every node reads and writes, split by weights vs activations.
+
+VAE decode, `[1,4,64,64]` → `[1,3,512,512]`, one forward pass:
+
+| | |
+|---|---:|
+| activation reads | 8951 MB (52.9%) |
+| output writes | 7981 MB (47.1%) |
+| weight reads | negligible |
+| **total** | **16.9 GB** |
+
+| top ops by traffic | |
+|---|---:|
+| Conv | 4810 MB (28.4%) |
+| GroupNorm | 3674 MB (21.7%) |
+| SiLU | 3657 MB (21.6%) |
+| Add | 2332 MB (13.8%) |
+
+### Two conclusions, both of which cancel work
+
+**1. Weight quantisation does nothing for the VAE.** Its weights are ~99 MB
+against 16.9 GB of traffic — under 1%. Halving weight precision changes the
+total by a rounding error. The traffic is essentially all activations, because
+the decoder's last stages carry `[1,128,512,512]` tensors at 134 MB each and
+push roughly thirty ops through them.
+
+**2. Bytes are not the binding constraint here either.** 16.9 GB at the M2 Max's
+~400 GB/s is a **42 ms** floor. We measure 4015 ms and ORT measures 3492 ms —
+**95× and 82× above it**. A workload that far from its roofline is not
+bandwidth-bound, so halving the bytes cannot buy anything close to the 2×
+ceiling the arithmetic suggests.
+
+So f16 activations for the VAE is not the lever. The counter cost twenty minutes
+and removed a week of kernel work that would have produced nothing measurable.
+
+### Where quantisation *is* the right lever
+
+The U-Net has the opposite shape: ~1.73 GB of weights against latent activations
+of a few tens of MB. There, weights are ~97% of the bytes, and halving them is
+close to halving total traffic — and it halves the download at the same time,
+which is the product's single biggest problem regardless of speed. That is the
+target, not the VAE, and it becomes measurable when the U-Net runs under our own
+executor.
+
 ## Our engine vs ONNX Runtime Web (`engine-vs-ort.mjs` / `.html`)
 
 The repo is framed around ORT being "the number to beat" — README and ROADMAP

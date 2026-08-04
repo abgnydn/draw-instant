@@ -1325,6 +1325,28 @@ export class Executor {
         const outDesc = out ? (out.buf ? `GPU${JSON.stringify(out.dims)}` : `CPU${JSON.stringify(out.dims || [])}:${out.dtype || '?'}`) : 'null'
         dlog(`@${ni} ${node.op_type.padEnd(18)} ${node.name || ''}  in=[${_inDescs.join(',')}]  out=${outDesc}  pool.live=${this.pool.live}`)
       }
+      // Memory-traffic accounting (LOG.traffic). Bytes moved is the variable
+      // that decides whether fusion or quantisation can help at all — dispatch
+      // count is not — so this counts what each node actually reads and writes,
+      // split by weights vs activations. Halving a category's precision can at
+      // best remove half of its share.
+      // Metadata ops (Shape, Reshape, Squeeze…) only touch dims, never the
+      // tensor data — charging them their input's byteLength inflates the
+      // total. Reshape in particular is a pure relabel here.
+      if (LOG.traffic && !METADATA_OPS.has(node.op_type)) {
+        LOG.trafficData = LOG.trafficData || { weights: 0, acts: 0, out: 0, byOp: {} }
+        const td = LOG.trafficData
+        let nodeBytes = 0
+        node.inputs.forEach((name, i) => {
+          const t = inputTensors[i]
+          if (!t || !t.buf) return
+          const b = t.byteLength || 0
+          nodeBytes += b
+          if (this.weights.has(name)) td.weights += b; else td.acts += b
+        })
+        if (outTensor?.buf) { const b = outTensor.byteLength || 0; td.out += b; nodeBytes += b }
+        td.byOp[node.op_type] = (td.byOp[node.op_type] || 0) + nodeBytes
+      }
       env.set(node.outputs[0], outTensor)
       // Profile mode: submit + await after each GPU op, record ms.
       if (LOG.profile && outTensor?.buf) {
