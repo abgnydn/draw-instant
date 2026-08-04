@@ -1,16 +1,39 @@
 // Lean node-only scoping. Skips initializer parsing entirely — we just want
 // op-type histogram + attribute names per op for an ONNX file.
-// Usage: node scope-nodes.mjs <path.onnx> [--json out.json]
+//
+// Accepts a local path OR a URL. For a URL it range-fetches only the HEAD of the
+// file, because ONNX writes the node graph before the weight blobs: the full
+// 5478-node graph of the 1.73 GB SD-Turbo U-Net is readable from the first 4 MB,
+// and the histogram is identical at 4 MB and 16 MB. That turns "download 1.73 GB
+// to find out which ops you need" into a few seconds.
+//
+// Every parse step already breaks on a bad tag, so a truncated buffer just ends
+// the walk early rather than throwing.
+//
+// Usage: node scope-nodes.mjs <path.onnx | url> [--json out.json] [--mb N]
 
 import fs from 'fs'
 
-const path = process.argv[2]
-if (!path) { console.error('usage: scope-nodes.mjs <path> [--json out.json]'); process.exit(1) }
+const src = process.argv[2]
+if (!src) { console.error('usage: scope-nodes.mjs <path|url> [--json out.json] [--mb N]'); process.exit(1) }
 const jsonIdx = process.argv.indexOf('--json')
 const jsonOut = jsonIdx >= 0 ? process.argv[jsonIdx + 1] : null
+const mbIdx = process.argv.indexOf('--mb')
+const headMB = mbIdx >= 0 ? Number(process.argv[mbIdx + 1]) : 8
 
-const buf = new Uint8Array(fs.readFileSync(path))
-console.log(`file: ${path} · ${(buf.byteLength / 1024 / 1024).toFixed(1)} MB`)
+let buf
+if (/^https?:/i.test(src)) {
+  const res = await fetch(src, { headers: { Range: `bytes=0-${headMB * 1024 * 1024 - 1}` } })
+  if (!res.ok) { console.error(`fetch ${src} → ${res.status}`); process.exit(1) }
+  buf = new Uint8Array(await res.arrayBuffer())
+  const full = res.headers.get('content-range')?.split('/')[1]
+  console.log(`url:  ${src}`)
+  console.log(`head: ${(buf.byteLength / 1024 / 1024).toFixed(1)} MB of ${full ? (Number(full) / 1e9).toFixed(2) + ' GB' : 'unknown'} (range-fetched — graph precedes the weights)`)
+  if (res.status !== 206) console.log('note: server ignored Range and sent the whole file')
+} else {
+  buf = new Uint8Array(fs.readFileSync(src))
+  console.log(`file: ${src} · ${(buf.byteLength / 1024 / 1024).toFixed(1)} MB`)
+}
 
 class PB {
   constructor(b, p = 0, end = b.byteLength) { this.b = b; this.p = p; this.end = end }
@@ -180,7 +203,7 @@ for (const op of Object.keys(attr).sort()) {
 
 if (jsonOut) {
   const out = {
-    path, bytes: buf.byteLength, nodeCount: nodes.length, tensorCount,
+    source: src, bytes: buf.byteLength, nodeCount: nodes.length, tensorCount,
     inputs, outputs,
     opHist: Object.entries(opHist).sort((a, b) => b[1] - a[1]),
     attr: Object.fromEntries(Object.entries(attr).map(([k, m]) => [k, [...m.entries()]])),
