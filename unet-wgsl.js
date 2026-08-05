@@ -29,6 +29,13 @@ const UNET_URL = './unet.onnx'
 const UNET_URL_FALLBACK = `${SCHMUELL_BASE}/unet/model.onnx`
 
 let _state = null
+// Set by the device.lost / uncapturederror handlers installed in loadUNetWGSL.
+// A forward pass checks these so an OOM surfaces as an error rather than as an
+// all-zero latent.
+let _deviceLost = null
+let _gpuError = null
+
+export function getUNetGpuFault() { return _deviceLost || _gpuError }
 
 export async function loadUNetWGSL(onProgress = () => {}) {
   if (_state) return _state
@@ -63,10 +70,32 @@ export async function loadUNetWGSL(onProgress = () => {}) {
       maxComputeWorkgroupSizeX: lim.maxComputeWorkgroupSizeX,
     },
   })
+  // Without these, a GPU OOM part-way through a 5478-node walk does not throw —
+  // the device is lost, subsequent dispatches are dropped, and run() returns an
+  // all-zero out_sample that looks like a plausible latent. A silent wrong
+  // answer is worse than a crash, and this graph is large enough to OOM.
+  device.lost.then((info) => {
+    console.error(`[unet-wgsl] DEVICE LOST (${info.reason}): ${info.message}`)
+    _deviceLost = `${info.reason}: ${info.message}`
+  })
+  device.addEventListener('uncapturederror', (e) => {
+    console.error('[unet-wgsl] uncaptured GPU error:', e.error?.message || e.error)
+    if (!_gpuError) _gpuError = e.error?.message || String(e.error)
+  })
+
   console.log('[unet-wgsl] device limits:', {
     maxStorageBufferBindingSize: device.limits.maxStorageBufferBindingSize,
     maxBufferSize: device.limits.maxBufferSize,
   })
+  // The U-Net's seq-4096 self-attention materialises [5,4096,4096] f32 score
+  // matrices = 320 MiB in a single storage binding. The WebGPU spec default is
+  // 128 MiB, so on a default-limit adapter the first attention fails with a raw
+  // validation error ~160 nodes in. Say so up front instead.
+  const NEED_BINDING = 336 * 1024 * 1024
+  if (device.limits.maxStorageBufferBindingSize < NEED_BINDING) {
+    console.warn(`[unet-wgsl] maxStorageBufferBindingSize=${(device.limits.maxStorageBufferBindingSize / 1048576) | 0} MiB ` +
+      `< ${(NEED_BINDING / 1048576) | 0} MiB needed for seq-4096 attention scores — expect a validation failure in the first attention block.`)
+  }
 
   const weights = new WeightCache(device, graph.tensors)
 
@@ -140,6 +169,10 @@ export async function unetForwardWGSL(sample, timestep, cond, { B = 1, H = 64, W
     [names.cond]: cT,
   })
   const ms = performance.now() - t0
+  // A device lost mid-walk does not reject run() — it silently drops the
+  // remaining dispatches and leaves a zero-filled output. Fail loudly instead.
+  const fault = getUNetGpuFault()
+  if (fault) throw new Error(`UNet forward aborted — GPU fault: ${fault}`)
   const outT = outputs[outName]
   if (!outT) throw new Error(`UNet output missing: ${outName}`)
 

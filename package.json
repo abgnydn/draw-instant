@@ -7,7 +7,7 @@
   "scripts": {
     "start": "python3 -m http.server 8787",
     "dev": "python3 -m http.server 8787",
-    "test": "node onnx-parser-test.mjs",
+    "test": "node onnx-parser-test.mjs && node fusion-test.mjs",
     "scope": "node scope-nodes.mjs",
     "bench:torch": "uv run bench-torch.py",
     "deploy": "npx wrangler deploy"

@@ -260,6 +260,24 @@ OPS.ConstantOfShape = (ctx, node, [shapeT]) => {
     else if (t.dtype === 'int32') fill = new Int32Array(t.data.buffer.slice(t.data.byteOffset, t.data.byteOffset + 4))[0]
     else if (t.dtype === 'float16') fill = ctx.f16BytesToF32(new Uint8Array(t.data.buffer, t.data.byteOffset, 2))[0]
   }
+  // An int64/int32 `value` means this node is shape metadata, not activation
+  // data. torch.onnx lowers `timesteps.expand(sample.shape[0])` to
+  // ConstantOfShape → Mul → Equal → Where → Expand, and Equal/Where implement
+  // only the both-operands-CPU path — so returning a GPU tensor here makes the
+  // U-Net die at node 10 of 5483, before the first Conv. Must return BEFORE
+  // pool.acquire so the buffer is not leaked on this path, and must use
+  // BigInt64Array for int64: OPS.Where takes its output Ctor from the operand's
+  // constructor and would otherwise throw converting BigInt to number.
+  //
+  // Exactly one of the U-Net's 33 ConstantOfShape nodes is int64; the other 32
+  // are float16 attention masks that must stay on the GPU. The VAE has none.
+  const vDtype = vAttr?.t?.dtype
+  if (vDtype === 'int64' || vDtype === 'int32') {
+    const Ctor = vDtype === 'int64' ? BigInt64Array : Int32Array
+    const cpuData = new Ctor(Math.max(numel, 0))
+    cpuData.fill(vDtype === 'int64' ? BigInt(fill) : fill)
+    return { isShape: true, cpuData, dims, dtype: vDtype }
+  }
   const buf = ctx.pool.acquire(Math.max(numel * 4, 4))
   const arr = new Float32Array(Math.max(numel, 1)).fill(fill)
   ctx.device.queue.writeBuffer(buf, 0, arr.buffer, 0, arr.byteLength)
@@ -891,15 +909,26 @@ export function fuseGroupNormPattern(graph) {
   for (const o of graph.outputs || []) consumers.set(o.name, (consumers.get(o.name) || 0) + 1)
   const producer = new Map()
   for (let i = 0; i < nodes.length; i++) for (const o of nodes[i].outputs) producer.set(o, i)
-  // Resolve a Constant tensor's cpu value (first element).
+  // Resolve a constant's uniform cpu value, from EITHER a Constant node's value
+  // attribute or a graph initializer.
+  //
+  // Initializers matter: the SD-Turbo U-Net contains zero Constant nodes — every
+  // constant is an initializer — so a Constant-only lookup made this whole pass
+  // fuse 0 of its 61 InstanceNormalization sites while silently reporting
+  // success. The VAE happens to use Constant nodes, which is why it fused 30.
   const constVal = (name) => {
+    const init = graph.tensors?.get?.(name)
+    if (init?.data) return uniformOf(init)
     const pi = producer.get(name)
     if (pi == null) return null
     const n = nodes[pi]
     if (n.op_type !== 'Constant') return null
     const a = n.attributes.find(x => x.name === 'value')
     if (!a || !a.t || !a.t.data) return null
-    const td = a.t
+    return uniformOf(a.t)
+  }
+  // A tensor's single value if every element is identical, else null.
+  function uniformOf(td) {
     // only care about float tensors of single value or uniform values
     if (td.dtype === 'float32') {
       const f = new Float32Array(td.data.buffer, td.data.byteOffset, td.data.byteLength / 4)
